@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: oag-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          # Assuming you build and push to a local registry or load into minikube/kind:
+          # e.g., `docker build -t open-api-gateway:local . -f deployments/Dockerfile`
+          image: open-api-gateway:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: grpc
+          env:
+            - name: ENVIRONMENT
+              value: "development"
+            - name: DEBUG
+              value: "true"
+            - name: SERVER__PORT
+              value: "8080"
+            - name: SERVER__GRPC_PORT
+              value: "9090"
+            - name: REDIS__URL
+              value: "redis://redis.oag-system.svc.cluster.local:6379/0"
+            - name: OBSERVABILITY__LOG_LEVEL
+              value: "INFO"
+            - name: OBSERVABILITY__LOG_FORMAT
+              value: "json"
+            - name: ROUTES_CONFIG
+              value: "/app/config/routes.yaml"
+            - name: GATEWAY_CONFIG
+              value: "/app/config/gateway.yaml"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sleep", "10"]
+          livenessProbe:
+            httpGet:
+              path: /_health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /_ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config-volume
+          configMap:
+            name: oag-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: oag-system
+spec:
+  type: LoadBalancer # Typically LoadBalancer in production, NodePort/ClusterIP in local
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+    - name: grpc
+      protocol: TCP
+      port: 9090
+      targetPort: grpc

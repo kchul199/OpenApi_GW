@@ -1,0 +1,14 @@
+name: Open API Gateway
+version: "1.0.0"
+
+# Global plugins applied to every route (before route-level plugins)
+global_plugins:
+  - name: request-id
+    enabled: true
+    config: {}
+
+  - name: access-logger
+    enabled: true
+    config:
+      log_headers: false
+      log_body: false

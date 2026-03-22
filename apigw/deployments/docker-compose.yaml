@@ -1,0 +1,124 @@
+version: "3.9"
+
+services:
+  # ── API Gateway ─────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    container_name: oag-gateway
+    ports:
+      - "8080:8080"   # HTTP / WebSocket
+      - "9090:9090"   # gRPC
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - WORKERS=4
+      - SERVER__PORT=8080
+      - SERVER__GRPC_PORT=9090
+      - REDIS__URL=redis://redis:6379/0
+      - OBSERVABILITY__LOG_LEVEL=INFO
+      - OBSERVABILITY__LOG_FORMAT=json
+      - ROUTES_CONFIG=/app/config/routes.yaml
+      - GATEWAY_CONFIG=/app/config/gateway.yaml
+    volumes:
+      - ../config:/app/config:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - oag-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/_health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Admin API ────────────────────────────────────────────────────────────────
+  admin:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    container_name: oag-admin
+    command: ["uvicorn", "admin.main:app", "--host", "0.0.0.0", "--port", "9000"]
+    ports:
+      - "9000:9000"
+    environment:
+      - ENVIRONMENT=development
+      - ADMIN__API_KEY=changeme-admin-key
+      - REDIS__URL=redis://redis:6379/0
+      - ROUTES_CONFIG=/app/config/routes.yaml
+      - GATEWAY_CONFIG=/app/config/gateway.yaml
+    volumes:
+      - ../config:/app/config:rw
+    depends_on:
+      - redis
+    networks:
+      - oag-net
+    restart: unless-stopped
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: oag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - oag-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Mock upstream service (for testing) ──────────────────────────────────────
+  mock-upstream:
+    image: mockoon/cli:latest
+    container_name: oag-mock-upstream
+    command: ["--data", "/data/mock.json", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    networks:
+      - oag-net
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: oag-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - oag-net
+    restart: unless-stopped
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: oag-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - oag-net
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  grafana-data:
+
+networks:
+  oag-net:
+    driver: bridge

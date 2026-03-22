@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+  namespace: oag-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin
+  template:
+    metadata:
+      labels:
+        app: admin
+    spec:
+      containers:
+        - name: admin
+          image: open-api-gateway:local
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "admin.main:app", "--host", "0.0.0.0", "--port", "9000"]
+          ports:
+            - containerPort: 9000
+              name: http
+          env:
+            - name: ENVIRONMENT
+              value: "development"
+            - name: ADMIN__API_KEY
+              value: "changeme-admin-key"
+            - name: REDIS__URL
+              value: "redis://redis.oag-system.svc.cluster.local:6379/0"
+            - name: ROUTES_CONFIG
+              value: "/app/config/routes.yaml"
+            - name: GATEWAY_CONFIG
+              value: "/app/config/gateway.yaml"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            name: oag-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+  namespace: oag-system
+spec:
+  type: ClusterIP
+  selector:
+    app: admin
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9000
+      targetPort: http

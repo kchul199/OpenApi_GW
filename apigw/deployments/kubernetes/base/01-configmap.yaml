@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oag-config
+  namespace: oag-system
+data:
+  gateway.yaml: |
+    name: Open API Gateway
+    version: "1.0.0"
+    global_plugins:
+      - name: request-id
+        enabled: true
+      - name: access-logger
+        enabled: true
+        config:
+          log_headers: false
+          log_body: false
+
+  routes.yaml: |
+    routes:
+      - id: public-health
+        description: "Public health check passthrough"
+        match:
+          protocol: HTTP
+          path: /health
+          methods: [GET]
+        upstream:
+          type: REST
+          targets:
+            - url: http://mock-upstream:8000
+              weight: 100
+          timeout: 5.0
+          retry:
+            count: 1
+            backoff_factor: 0.1
+            status_codes: [502, 503]
+          load_balance: round_robin
+        plugins: []
+
+      - id: mock-api
+        description: "Mock API Route"
+        match:
+          protocol: HTTP
+          path: /api/mock/**
+          methods: [GET, POST]
+        upstream:
+          type: REST
+          targets:
+            - url: http://mock-upstream:8000
+              weight: 100
+        strip_prefix: false
+        plugins:
+          - name: rate-limiter
+            enabled: true
+            config:
+              limit: 100
+              window: 60
+              key_func: ip
