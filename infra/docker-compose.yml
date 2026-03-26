@@ -1,0 +1,442 @@
+# =============================================================================
+# 코인 자동 매매 시스템 - Docker Compose (개발/로컬 환경)
+# =============================================================================
+# 구성:
+#   - Redis Sentinel HA: master + 2 replica + 3 sentinel
+#   - PostgreSQL 16
+#   - backend (FastAPI)
+#   - celery-worker
+#   - celery-beat
+#   - frontend (Next.js)
+#   - prometheus
+#   - grafana
+#   - nginx (리버스 프록시)
+#
+# 사용법:
+#   docker compose -f infra/docker-compose.yml up -d
+# =============================================================================
+
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# 공통 환경변수 앵커: backend, celery-worker, celery-beat가 공유
+# ---------------------------------------------------------------------------
+x-backend-env: &backend-env
+  # --- DB ---
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://cointrader:secret@postgres:5432/cointrader}
+
+  # --- Redis Sentinel ---
+  REDIS_SENTINEL_HOSTS: ${REDIS_SENTINEL_HOSTS:-redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379}
+  REDIS_SENTINEL_MASTER: ${REDIS_SENTINEL_MASTER:-mymaster}
+
+  # --- Auth ---
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret-key-in-production}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+
+  # --- Exchange ---
+  EXCHANGE_ID: ${EXCHANGE_ID:-binance}
+  USE_TESTNET: ${USE_TESTNET:-true}
+  QUOTE_CURRENCY: ${QUOTE_CURRENCY:-USDT}
+
+  # --- Encryption (API key 암호화용 32바이트 hex) ---
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:-change-this-32-byte-hex-key-here}
+
+  # --- Claude AI ---
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+  # --- Notifications ---
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  EMAIL_FROM: ${EMAIL_FROM:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+
+  # --- Celery ---
+  CELERY_BROKER_URL: ${CELERY_BROKER_URL:-sentinel://redis-sentinel-1:26379/0}
+  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis-master:6379/1}
+
+  # --- Log level ---
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+networks:
+  # 내부 서비스 통신용 네트워크
+  backend-net:
+    driver: bridge
+  # Redis 클러스터 전용 네트워크
+  redis-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-master-data:
+  redis-replica-1-data:
+  redis-replica-2-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+
+  # ===========================================================================
+  # PostgreSQL 16
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: cointrader-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cointrader
+      POSTGRES_USER: cointrader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      # 타임존 UTC 고정
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # 초기 스키마 DDL 자동 실행
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - backend-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cointrader -d cointrader"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===========================================================================
+  # Redis Master
+  # ===========================================================================
+  redis-master:
+    image: redis:7-alpine
+    container_name: cointrader-redis-master
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning --requirepass ${REDIS_PASSWORD:-redispassword}
+    volumes:
+      - redis-master-data:/data
+    networks:
+      - backend-net
+      - redis-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispassword}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # Redis Replica 1
+  # ===========================================================================
+  redis-replica-1:
+    image: redis:7-alpine
+    container_name: cointrader-redis-replica-1
+    restart: unless-stopped
+    command: >
+      redis-server
+      --slaveof redis-master 6379
+      --requirepass ${REDIS_PASSWORD:-redispassword}
+      --masterauth ${REDIS_PASSWORD:-redispassword}
+      --loglevel warning
+    volumes:
+      - redis-replica-1-data:/data
+    networks:
+      - backend-net
+      - redis-net
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Redis Replica 2
+  # ===========================================================================
+  redis-replica-2:
+    image: redis:7-alpine
+    container_name: cointrader-redis-replica-2
+    restart: unless-stopped
+    command: >
+      redis-server
+      --slaveof redis-master 6379
+      --requirepass ${REDIS_PASSWORD:-redispassword}
+      --masterauth ${REDIS_PASSWORD:-redispassword}
+      --loglevel warning
+    volumes:
+      - redis-replica-2-data:/data
+    networks:
+      - backend-net
+      - redis-net
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Redis Sentinel 1
+  # quorum: 2 (sentinel 3개 중 2개 동의 시 failover)
+  # ===========================================================================
+  redis-sentinel-1:
+    image: redis:7-alpine
+    container_name: cointrader-redis-sentinel-1
+    restart: unless-stopped
+    command: >
+      sh -c "
+        cp /sentinel-template.conf /sentinel.conf &&
+        echo 'sentinel auth-pass mymaster ${REDIS_PASSWORD:-redispassword}' >> /sentinel.conf &&
+        redis-sentinel /sentinel.conf
+      "
+    volumes:
+      - ./redis/sentinel.conf:/sentinel-template.conf:ro
+    networks:
+      - backend-net
+      - redis-net
+    ports:
+      - "26379:26379"
+    depends_on:
+      - redis-master
+      - redis-replica-1
+      - redis-replica-2
+
+  # ===========================================================================
+  # Redis Sentinel 2
+  # ===========================================================================
+  redis-sentinel-2:
+    image: redis:7-alpine
+    container_name: cointrader-redis-sentinel-2
+    restart: unless-stopped
+    command: >
+      sh -c "
+        cp /sentinel-template.conf /sentinel.conf &&
+        echo 'sentinel auth-pass mymaster ${REDIS_PASSWORD:-redispassword}' >> /sentinel.conf &&
+        redis-sentinel /sentinel.conf
+      "
+    volumes:
+      - ./redis/sentinel.conf:/sentinel-template.conf:ro
+    networks:
+      - backend-net
+      - redis-net
+    ports:
+      - "26380:26379"
+    depends_on:
+      - redis-master
+      - redis-replica-1
+      - redis-replica-2
+
+  # ===========================================================================
+  # Redis Sentinel 3
+  # ===========================================================================
+  redis-sentinel-3:
+    image: redis:7-alpine
+    container_name: cointrader-redis-sentinel-3
+    restart: unless-stopped
+    command: >
+      sh -c "
+        cp /sentinel-template.conf /sentinel.conf &&
+        echo 'sentinel auth-pass mymaster ${REDIS_PASSWORD:-redispassword}' >> /sentinel.conf &&
+        redis-sentinel /sentinel.conf
+      "
+    volumes:
+      - ./redis/sentinel.conf:/sentinel-template.conf:ro
+    networks:
+      - backend-net
+      - redis-net
+    ports:
+      - "26381:26379"
+    depends_on:
+      - redis-master
+      - redis-replica-1
+      - redis-replica-2
+
+  # ===========================================================================
+  # Backend (FastAPI)
+  # ===========================================================================
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: cointrader-backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      # 개발 환경에서는 reload 활성화
+      RELOAD: "true"
+    volumes:
+      # 개발 시 소스 코드 hot-reload
+      - ../backend:/app:cached
+    ports:
+      - "8000:8000"
+    networks:
+      - backend-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ===========================================================================
+  # Celery Worker
+  # 전략 실행, 주문 처리, AI 조회 등 비동기 태스크 처리
+  # ===========================================================================
+  celery-worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: cointrader-celery-worker
+    restart: unless-stopped
+    # 환경변수 앵커 재사용
+    environment:
+      <<: *backend-env
+    command: >
+      celery -A app.celery_app worker
+      --loglevel=${LOG_LEVEL:-INFO}
+      --concurrency=4
+      --queues=default,orders,ai_tasks
+      --hostname=worker@%h
+    volumes:
+      - ../backend:/app:cached
+    networks:
+      - backend-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis-master:
+        condition: service_healthy
+      redis-sentinel-1:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$$HOSTNAME | grep -q OK"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ===========================================================================
+  # Celery Beat
+  # 주기적 태스크 스케줄러 (잔고 동기화, 캔들 수집 등)
+  # ===========================================================================
+  celery-beat:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: cointrader-celery-beat
+    restart: unless-stopped
+    # 환경변수 앵커 재사용
+    environment:
+      <<: *backend-env
+    command: >
+      celery -A app.celery_app beat
+      --loglevel=${LOG_LEVEL:-INFO}
+      --scheduler=django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - ../backend:/app:cached
+    networks:
+      - backend-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis-master:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+
+  # ===========================================================================
+  # Frontend (Next.js)
+  # ===========================================================================
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: cointrader-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000}
+      NODE_ENV: development
+    volumes:
+      - ../frontend:/app:cached
+      # node_modules는 컨테이너 내부 것을 사용 (오버마운트 방지)
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    networks:
+      - backend-net
+    depends_on:
+      - backend
+
+  # ===========================================================================
+  # Nginx (리버스 프록시 + SSL 종단)
+  # /api/  → backend:8000
+  # /ws    → backend:8000 (WebSocket)
+  # /      → frontend:3000
+  # ===========================================================================
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cointrader-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # SSL 인증서 (개발 시 self-signed, 운영 시 Let's Encrypt 볼륨 교체)
+      # - ./nginx/certs:/etc/nginx/certs:ro
+    ports:
+      - "80:80"
+      # - "443:443"
+    networks:
+      - backend-net
+    depends_on:
+      - backend
+      - frontend
+
+  # ===========================================================================
+  # Prometheus (메트릭 수집)
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: cointrader-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # 15일 데이터 보존
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - backend-net
+
+  # ===========================================================================
+  # Grafana (대시보드)
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: cointrader-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Prometheus 데이터소스 자동 프로비저닝
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # 대시보드 / 데이터소스 프로비저닝 디렉토리
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    networks:
+      - backend-net
+    depends_on:
+      - prometheus

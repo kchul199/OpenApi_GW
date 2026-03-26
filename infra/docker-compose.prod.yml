@@ -1,0 +1,312 @@
+# =============================================================================
+# 코인 자동 매매 시스템 - Docker Compose 운영(prod) 오버라이드
+# =============================================================================
+# 기본 파일 위에 덮어쓰는 운영 환경 전용 설정:
+#   - 서비스 replicas (수평 확장)
+#   - 리소스 제한 (CPU / Memory)
+#   - 재시작 정책 (always)
+#   - 볼륨/네트워크 드라이버 운영 등급으로 교체
+#
+# 사용법:
+#   docker compose \
+#     -f infra/docker-compose.yml \
+#     -f infra/docker-compose.prod.yml \
+#     up -d
+#
+# 주의: Docker Swarm mode 또는 단일 노드 Compose 배포 모두 지원.
+#       Swarm이 아닌 Compose 환경에서는 replicas > 1 시 포트 충돌에 주의.
+# =============================================================================
+
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# 공통 운영 배포 정책 앵커
+# ---------------------------------------------------------------------------
+x-deploy-default: &deploy-default
+  restart_policy:
+    condition: any          # 어떤 이유로도 종료 시 재시작
+    delay: 5s               # 재시작 전 대기
+    max_attempts: 5         # 최대 재시도 횟수
+    window: 60s             # 재시도 판정 윈도우
+
+x-logging-default: &logging-default
+  driver: "json-file"
+  options:
+    max-size: "50m"          # 파일당 최대 50 MB
+    max-file: "5"            # 최대 5개 파일 보관
+
+services:
+
+  # ===========================================================================
+  # PostgreSQL 16 (운영)
+  # - 재시작 정책: always
+  # - 리소스 제한: 2 CPU / 2 GB
+  # ===========================================================================
+  postgres:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    environment:
+      # 운영 환경에서는 반드시 외부 시크릿 또는 .env로 주입
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  # ===========================================================================
+  # Redis Master (운영)
+  # - 재시작 정책: always
+  # - 리소스 제한: 1 CPU / 512 MB
+  # ===========================================================================
+  redis-master:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  # ===========================================================================
+  # Redis Replica 1 (운영)
+  # ===========================================================================
+  redis-replica-1:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # ===========================================================================
+  # Redis Replica 2 (운영)
+  # ===========================================================================
+  redis-replica-2:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # ===========================================================================
+  # Redis Sentinel 1~3 (운영)
+  # ===========================================================================
+  redis-sentinel-1:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 64M
+
+  redis-sentinel-2:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 64M
+
+  redis-sentinel-3:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 64M
+
+  # ===========================================================================
+  # Backend (FastAPI) — 운영
+  # - replicas: 2 (로드밸런싱)
+  # - hot-reload OFF (개발 전용)
+  # - 소스 볼륨 마운트 제거 (이미지 내장 코드 사용)
+  # - 리소스 제한: 2 CPU / 1 GB per replica
+  # ===========================================================================
+  backend:
+    restart: always
+    logging: *logging-default
+    # 운영 이미지 빌드 target 변경 (multi-stage)
+    build:
+      target: production
+    environment:
+      RELOAD: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-WARNING}
+    volumes: []            # 운영에서는 소스 볼륨 마운트 없음
+    deploy:
+      <<: *deploy-default
+      replicas: 2           # 수평 확장: 2 인스턴스
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+      update_config:
+        parallelism: 1      # 롤링 업데이트: 1개씩
+        delay: 10s
+        failure_action: rollback
+        order: start-first  # 새 컨테이너 먼저 시작 후 구 컨테이너 종료
+
+  # ===========================================================================
+  # Celery Worker (운영)
+  # - replicas: 2
+  # - 소스 볼륨 마운트 제거
+  # - 리소스 제한: 2 CPU / 2 GB per replica
+  # ===========================================================================
+  celery-worker:
+    restart: always
+    logging: *logging-default
+    build:
+      target: production
+    volumes: []
+    deploy:
+      <<: *deploy-default
+      replicas: 2
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+      update_config:
+        parallelism: 1
+        delay: 15s
+        failure_action: rollback
+
+  # ===========================================================================
+  # Celery Beat (운영)
+  # - replicas: 1 (스케줄러는 단일 인스턴스 필수)
+  # - 리소스 제한: 0.5 CPU / 256 MB
+  # ===========================================================================
+  celery-beat:
+    restart: always
+    logging: *logging-default
+    build:
+      target: production
+    volumes: []
+    deploy:
+      <<: *deploy-default
+      replicas: 1           # Beat는 반드시 1개
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # ===========================================================================
+  # Frontend (Next.js) — 운영
+  # - replicas: 2
+  # - NODE_ENV: production
+  # ===========================================================================
+  frontend:
+    restart: always
+    logging: *logging-default
+    build:
+      target: production
+    environment:
+      NODE_ENV: production
+    volumes: []
+    deploy:
+      <<: *deploy-default
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.2"
+          memory: 128M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+
+  # ===========================================================================
+  # Nginx (운영)
+  # - SSL 인증서 볼륨 활성화
+  # - 포트 443 개방
+  # ===========================================================================
+  nginx:
+    restart: always
+    logging: *logging-default
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 운영 Let's Encrypt 인증서 마운트
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
+  # ===========================================================================
+  # Prometheus (운영)
+  # - 30일 데이터 보존
+  # ===========================================================================
+  prometheus:
+    restart: always
+    logging: *logging-default
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.2"
+          memory: 256M
+
+  # ===========================================================================
+  # Grafana (운영)
+  # ===========================================================================
+  grafana:
+    restart: always
+    logging: *logging-default
+    deploy:
+      <<: *deploy-default
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
