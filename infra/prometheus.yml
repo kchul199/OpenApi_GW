@@ -1,0 +1,172 @@
+# =============================================================================
+# 코인 자동 매매 시스템 - Prometheus 스크레이프 설정
+# =============================================================================
+# 수집 대상:
+#   1. prometheus 자기 자신
+#   2. backend:8000/metrics       (FastAPI + starlette-prometheus)
+#   3. celery-worker:5555/metrics (Flower 또는 celery-exporter)
+#   4. postgres:9187/metrics      (postgres_exporter) — 선택
+#   5. redis:9121/metrics         (redis_exporter)     — 선택
+#   6. nginx:9113/metrics         (nginx-prometheus-exporter) — 선택
+#
+# 적용 방법:
+#   volumes:
+#     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+# =============================================================================
+
+global:
+  # 기본 스크레이프 간격: 15초 (거래 시스템 특성상 짧게 유지)
+  scrape_interval: 15s
+  # 스크레이프 타임아웃 (interval보다 짧아야 함)
+  scrape_timeout: 10s
+  # 알림 평가 간격
+  evaluation_interval: 15s
+  # 모든 시계열에 붙는 외부 레이블 (Thanos / 원격 쓰기 식별용)
+  external_labels:
+    environment: "development"
+    project: "coin-trader"
+
+# =============================================================================
+# 알림 규칙 파일 (선택: rules/ 디렉토리에 rule 파일 추가 시 활성화)
+# =============================================================================
+# rule_files:
+#   - "rules/*.yml"
+
+# =============================================================================
+# Alertmanager 연동 (선택: 운영 환경에서 주석 해제)
+# =============================================================================
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#             - alertmanager:9093
+
+# =============================================================================
+# 스크레이프 설정
+# =============================================================================
+scrape_configs:
+
+  # ---------------------------------------------------------------------------
+  # 1. Prometheus 자기 자신
+  # ---------------------------------------------------------------------------
+  - job_name: "prometheus"
+    # 기본값: http, /metrics
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          service: "prometheus"
+
+  # ---------------------------------------------------------------------------
+  # 2. FastAPI Backend
+  # 라이브러리: prometheus-fastapi-instrumentator
+  # 엔드포인트: GET /metrics
+  # 주요 메트릭:
+  #   http_requests_total, http_request_duration_seconds,
+  #   http_request_size_bytes, http_response_size_bytes
+  # ---------------------------------------------------------------------------
+  - job_name: "backend"
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]
+        labels:
+          service: "fastapi-backend"
+          component: "api"
+
+  # ---------------------------------------------------------------------------
+  # 3. Celery Worker (Flower 또는 celery-prometheus-exporter)
+  # 옵션 A: Flower (기본 포트 5555, /metrics 경로 지원)
+  #   실행 명령: celery flower --port=5555
+  # 옵션 B: celery-prometheus-exporter (독립 프로세스, 포트 8888 등)
+  # 주요 메트릭:
+  #   celery_tasks_total, celery_task_duration_seconds,
+  #   celery_workers_online, celery_queue_length
+  # ---------------------------------------------------------------------------
+  - job_name: "celery-worker"
+    scrape_interval: 30s   # Celery 메트릭은 빈도 낮춰도 충분
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["celery-worker:5555"]
+        labels:
+          service: "celery-worker"
+          component: "task-queue"
+
+  # ---------------------------------------------------------------------------
+  # 4. PostgreSQL Exporter (선택)
+  # 이미지: prometheuscommunity/postgres-exporter
+  # 기본 포트: 9187
+  # 주요 메트릭:
+  #   pg_up, pg_stat_activity_count, pg_stat_bgwriter_*,
+  #   pg_database_size_bytes, pg_locks_count
+  # ---------------------------------------------------------------------------
+  - job_name: "postgres"
+    scrape_interval: 30s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          service: "postgresql"
+          component: "database"
+
+  # ---------------------------------------------------------------------------
+  # 5. Redis Exporter (선택)
+  # 이미지: oliver006/redis_exporter
+  # 기본 포트: 9121
+  # 주요 메트릭:
+  #   redis_up, redis_connected_clients, redis_memory_used_bytes,
+  #   redis_keyspace_hits_total, redis_keyspace_misses_total
+  # ---------------------------------------------------------------------------
+  - job_name: "redis"
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          service: "redis"
+          component: "cache"
+
+  # ---------------------------------------------------------------------------
+  # 6. Nginx Prometheus Exporter (선택)
+  # 이미지: nginx/nginx-prometheus-exporter
+  # 기본 포트: 9113
+  # nginx.conf에 stub_status 활성화 필요 (/nginx_status)
+  # 주요 메트릭:
+  #   nginx_connections_active, nginx_http_requests_total
+  # ---------------------------------------------------------------------------
+  - job_name: "nginx"
+    scrape_interval: 30s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["nginx-exporter:9113"]
+        labels:
+          service: "nginx"
+          component: "proxy"
+
+  # ---------------------------------------------------------------------------
+  # 7. Node Exporter (선택: 호스트 시스템 리소스 모니터링)
+  # 이미지: prom/node-exporter
+  # 기본 포트: 9100
+  # 주요 메트릭:
+  #   node_cpu_seconds_total, node_memory_MemAvailable_bytes,
+  #   node_disk_io_time_seconds_total, node_network_receive_bytes_total
+  # ---------------------------------------------------------------------------
+  - job_name: "node"
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          service: "node-exporter"
+          component: "system"
+
+  # ---------------------------------------------------------------------------
+  # 8. Grafana 자체 메트릭 (선택)
+  # ---------------------------------------------------------------------------
+  - job_name: "grafana"
+    scrape_interval: 60s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["grafana:3000"]
+        labels:
+          service: "grafana"
+          component: "monitoring"
