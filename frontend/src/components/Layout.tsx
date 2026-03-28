@@ -1,5 +1,6 @@
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { Outlet, NavLink } from 'react-router-dom'
 import { useAuthStore } from '@/stores/authStore'
+import PriceFeedConnector from '@/components/PriceFeedConnector'
 import {
   LayoutDashboard,
   Layers,
@@ -7,6 +8,9 @@ import {
   Wallet,
   LogOut,
   TrendingUp,
+  FlaskConical,
+  BrainCircuit,
+  KeyRound,
 } from 'lucide-react'
 
 const NAV_ITEMS = [
@@ -14,6 +18,9 @@ const NAV_ITEMS = [
   { to: '/strategies', label: '전략', icon: Layers },
   { to: '/orders', label: '주문내역', icon: ClipboardList },
   { to: '/portfolio', label: '포트폴리오', icon: Wallet },
+  { to: '/backtest', label: '백테스트', icon: FlaskConical },
+  { to: '/ai-advice', label: 'AI 자문', icon: BrainCircuit },
+  { to: '/exchanges', label: '거래소 계정', icon: KeyRound },
 ]
 
 export default function Layout() {
@@ -22,6 +29,7 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen bg-gray-950 text-gray-100">
+      <PriceFeedConnector />
       {/* Sidebar */}
       <aside className="w-60 flex flex-col bg-gray-900 border-r border-gray-800">
         {/* Logo */}
