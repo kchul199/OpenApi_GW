@@ -100,6 +100,15 @@ async def redis_incr(key: str) -> int:
     return await r.incr(key)
 
 
+async def redis_incr_float(key: str, amount: float, ex: int | None = None) -> float:
+    """INCRBYFLOAT – 키에 float 값을 더합니다. ex(초) 옵션으로 TTL 설정 가능."""
+    r = await get_redis()
+    result = await r.incrbyfloat(key, amount)
+    if ex is not None:
+        await r.expire(key, ex)
+    return float(result)
+
+
 # ── 분산 락 ───────────────────────────────────────────────────────────────────
 
 async def redis_set_nx(key: str, value: str, ex: int) -> bool:
