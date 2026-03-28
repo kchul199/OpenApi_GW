@@ -148,7 +148,18 @@ def send_daily_report() -> dict:
             total_trades,
             total_pnl,
         )
-        # TODO: Telegram / Email 발송 연동
+
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        report_text = (
+            f"📊 <b>CoinTrader 일일 리포트</b>\n"
+            f"날짜: {now.strftime('%Y-%m-%d')}\n"
+            f"거래 횟수: {total_trades}건\n"
+            f"실현 손익: {pnl_sign}{total_pnl:.2f} USDT"
+        )
+        from app.services.notification_service import NotificationService
+        svc = NotificationService()
+        await svc.notify(report_text, subject="CoinTrader 일일 리포트")
+
         return {"trades": total_trades, "total_pnl": total_pnl}
 
     return _run_async(_execute())

@@ -1,17 +1,25 @@
 """주문 조회 및 취소 API."""
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import BadRequestException
+from app.core.security import decrypt_api_key
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.exchange.ccxt_adapter import CcxtAdapter
+from app.models.exchange_account import ExchangeAccount
 from app.models.user import User
 from app.schemas.order import OrderResponse
 from app.services.order_service import OrderService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 _svc = OrderService()
@@ -53,15 +61,39 @@ async def cancel_order(
     current_user: Annotated[User, Depends(get_current_user)],
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """미체결 주문을 취소합니다.
-
-    거래소 API 연결이 필요하므로 실제 배포에서는 exchange_account 정보를
-    주입해 CcxtAdapter 를 초기화해야 합니다.
-    현재는 DB 상태만 canceled 로 변경합니다.
-    """
+    """미체결 주문을 취소합니다. 거래소 API를 통해 실제 취소 요청을 전송합니다."""
     order = await _svc.get_order(db, order_id, current_user.id)
     if order.status not in ("open", "partially_filled"):
         return {"message": f"Order already in status '{order.status}'"}
+
+    # 거래소 API 취소 시도 (exchange_order_id 가 있는 경우)
+    if order.exchange_order_id:
+        acc_result = await db.execute(
+            select(ExchangeAccount).where(
+                ExchangeAccount.user_id == current_user.id,
+                ExchangeAccount.exchange_id == order.exchange_id,
+                ExchangeAccount.is_active == True,
+            ).limit(1)
+        )
+        account = acc_result.scalar_one_or_none()
+        if account is None:
+            raise BadRequestException(
+                f"No active exchange account found for '{order.exchange_id}'"
+            )
+        adapter = CcxtAdapter(
+            exchange_id=account.exchange_id,
+            api_key=decrypt_api_key(account.api_key_encrypted),
+            api_secret=decrypt_api_key(account.api_secret_encrypted),
+            testnet=account.is_testnet,
+        )
+        try:
+            await adapter.cancel_order(order.exchange_order_id, order.symbol)
+        except Exception as exc:
+            logger.warning("Exchange cancel_order failed: %s", exc)
+            raise BadRequestException(f"Exchange cancel failed: {exc}") from exc
+        finally:
+            await adapter.close()
+
     order.status = "canceled"
     await db.commit()
-    return {"message": "Order cancel requested"}
+    return {"message": "Order canceled successfully"}

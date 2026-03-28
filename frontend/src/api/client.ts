@@ -52,11 +52,11 @@ export const strategiesApi = {
   update: (id: string, data: Partial<CreateStrategyPayload>) =>
     apiClient.put<Strategy>(`/strategies/${id}`, data),
   delete: (id: string) => apiClient.delete(`/strategies/${id}`),
-  toggle: (id: string, active: boolean) =>
-    apiClient.patch<Strategy>(`/strategies/${id}/toggle`, { active }),
-  emergencyStop: (id: string) =>
-    apiClient.post(`/strategies/${id}/emergency-stop`),
-  emergencyStopAll: () => apiClient.post('/strategies/emergency-stop-all'),
+  activate: (id: string) => apiClient.post<Strategy>(`/strategies/${id}/activate`),
+  pause: (id: string) => apiClient.post<Strategy>(`/strategies/${id}/pause`),
+  emergencyStop: (id: string, reason?: string) =>
+    apiClient.post(`/strategies/${id}/emergency-stop`, { reason: reason ?? 'manual' }),
+  resume: (id: string) => apiClient.post<Strategy>(`/strategies/${id}/resume`),
 }
 
 export const ordersApi = {
@@ -76,9 +76,19 @@ export const aiApi = {
 }
 
 export const exchangeApi = {
-  list: () => apiClient.get<ExchangeAccount[]>('/exchanges'),
-  create: (data: CreateExchangePayload) => apiClient.post<ExchangeAccount>('/exchanges', data),
-  delete: (id: string) => apiClient.delete(`/exchanges/${id}`),
+  list: () => apiClient.get<ExchangeAccount[]>('/exchange/accounts'),
+  create: (data: CreateExchangePayload) => apiClient.post<ExchangeAccount>('/exchange/accounts', data),
+  delete: (id: string) => apiClient.delete(`/exchange/accounts/${id}`),
+  supported: () => apiClient.get<{ exchanges: string[] }>('/exchange/supported'),
+}
+
+export const backtestApi = {
+  list: (strategyId?: string) =>
+    apiClient.get<{ items: BacktestResult[]; total: number }>('/backtest', {
+      params: strategyId ? { strategy_id: strategyId } : undefined,
+    }),
+  create: (data: CreateBacktestPayload) => apiClient.post<BacktestResult>('/backtest', data),
+  get: (id: string) => apiClient.get<BacktestResult>(`/backtest/${id}`),
 }
 
 export const chartApi = {
@@ -106,30 +116,39 @@ export const dashboardApi = {
 export const twoFactorApi = {
   setup: () => apiClient.post<{ secret: string; qr_code: string }>('/auth/2fa/setup'),
   verify: (code: string) => apiClient.post('/auth/2fa/verify', { code }),
-  disable: (code: string) => apiClient.post('/auth/2fa/disable', { code }),
+  disable: (code: string) => apiClient.delete('/auth/2fa/disable', { data: { totp_code: code } }),
 }
 
 // Shared types
 export interface Strategy {
   id: string
+  user_id: string
   name: string
   symbol: string
-  active: boolean
-  ai_mode: boolean
+  timeframe: string
+  condition_tree: Record<string, unknown>
+  order_config: Record<string, unknown>
+  ai_mode: 'off' | 'advisory' | 'auto'
   priority: number
+  is_active: boolean
+  is_paused: boolean
+  emergency_stopped: boolean
+  total_trades: number
+  total_pnl: number
   created_at: string
   updated_at: string
-  description?: string
-  parameters?: Record<string, unknown>
 }
 
 export interface CreateStrategyPayload {
   name: string
   symbol: string
-  ai_mode: boolean
+  timeframe: string
+  condition_tree: Record<string, unknown>
+  order_config: Record<string, unknown>
+  ai_mode: 'off' | 'advisory' | 'auto'
   priority: number
-  description?: string
-  parameters?: Record<string, unknown>
+  hold_retry_interval?: number
+  hold_max_retry?: number
 }
 
 export interface Order {
@@ -167,39 +186,65 @@ export interface PortfolioSummary {
 
 export interface AiAdvice {
   id: string
-  symbol: string
-  decision: 'execute' | 'hold' | 'avoid'
+  strategy_id: string
+  recommendation: 'execute' | 'hold' | 'cancel'
   confidence: number
-  risk_level: 'low' | 'medium' | 'high'
-  reason: string
+  reasoning: string
+  is_error: boolean
   created_at: string
-  executed: boolean
-  result_pnl?: number
 }
 
 export interface AiStats {
   total_advice: number
   execute_count: number
   hold_count: number
-  avoid_count: number
-  executed_pnl: number
-  ai_win_rate: number
+  cancel_count: number
+  error_count: number
+  avg_confidence: number
 }
 
 export interface ExchangeAccount {
   id: string
-  exchange: string
-  api_key: string
-  testnet: boolean
+  exchange_id: string
+  label: string
+  is_testnet: boolean
+  is_active: boolean
+  last_synced_at: string | null
   created_at: string
-  active: boolean
 }
 
 export interface CreateExchangePayload {
-  exchange: string
+  exchange_id: string
+  label: string
   api_key: string
   api_secret: string
-  testnet: boolean
+  is_testnet: boolean
+}
+
+export interface BacktestResult {
+  id: string
+  strategy_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  from_date: string
+  to_date: string
+  total_return: number
+  annualized_return: number
+  sharpe_ratio: number
+  sortino_ratio: number
+  max_drawdown: number
+  win_rate: number
+  profit_factor: number
+  total_trades: number
+  created_at: string
+  completed_at?: string
+  error_message?: string
+}
+
+export interface CreateBacktestPayload {
+  strategy_id: string
+  from_date: string
+  to_date: string
+  initial_capital: number
 }
 
 export interface CandleData {

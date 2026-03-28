@@ -2,6 +2,11 @@
 
 활성화된 전략을 순회하며 조건을 평가하고 주문을 실행합니다.
 Celery 태스크에서 주기적으로 호출됩니다.
+
+ai_mode:
+    0 (off)       – AI 자문 없이 신호 즉시 실행
+    1 (advisory)  – AI 자문 요청 후 recommendation == "execute" 일 때만 실행
+    2 (auto)      – AI 자문 없이 신호 즉시 실행 (advisory와 달리 항상 실행)
 """
 from __future__ import annotations
 
@@ -13,11 +18,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import (
-    ExchangeException,
-    TradingHaltedException,
-)
-from app.core.redis_client import redis_set
+from app.core.exceptions import ExchangeException, TradingHaltedException
 from app.exchange.ccxt_adapter import CcxtAdapter
 from app.models.order import Order
 from app.models.strategy import Strategy
@@ -27,13 +28,18 @@ from app.trading.strategy_evaluator import StrategyEvaluator
 
 logger = logging.getLogger(__name__)
 
+# ai_mode int 값
+_AI_OFF = 0
+_AI_ADVISORY = 1
+_AI_AUTO = 2
+
 
 class TradingEngine:
-    """전략 평가 → 리스크 검사 → 주문 실행 파이프라인.
+    """전략 평가 → AI 자문(선택) → 리스크 검사 → 주문 실행 파이프라인.
 
     Args:
-        adapter:    CcxtAdapter 인스턴스 (이미 초기화된 거래소 클라이언트)
-        db:         비동기 DB 세션
+        adapter: CcxtAdapter 인스턴스 (이미 초기화된 거래소 클라이언트)
+        db:      비동기 DB 세션
     """
 
     def __init__(self, adapter: CcxtAdapter, db: AsyncSession) -> None:
@@ -46,16 +52,13 @@ class TradingEngine:
     # ── 진입점 ────────────────────────────────────────────────────────────────
 
     async def run_once(self, strategy_id: uuid.UUID) -> dict:
-        """단일 전략에 대해 한 번의 평가·실행 사이클을 수행합니다.
-
-        Returns:
-            실행 결과 요약 dict
-        """
+        """단일 전략에 대해 한 번의 평가·실행 사이클을 수행합니다."""
         result: dict = {
             "strategy_id": str(strategy_id),
             "signal": None,
             "order_id": None,
             "skipped_reason": None,
+            "ai_recommendation": None,
         }
 
         # 1. 전략 조회
@@ -70,9 +73,7 @@ class TradingEngine:
 
         # 2. 리스크 검사 (긴급 정지 플래그)
         try:
-            await self.risk_manager.can_trade(
-                str(strategy.id), str(strategy.user_id)
-            )
+            await self.risk_manager.can_trade(str(strategy.id), str(strategy.user_id))
         except TradingHaltedException as e:
             result["skipped_reason"] = str(e)
             return result
@@ -102,16 +103,48 @@ class TradingEngine:
         entry_result = self.evaluator.evaluate(entry_tree, ohlcv_df) if entry_tree else None
         exit_result = self.evaluator.evaluate(exit_tree, ohlcv_df) if exit_tree else None
 
-        # 5. 현재 포지션 파악 (미체결/체결 매수 주문 합산)
+        # 5. 현재 포지션 파악
         open_qty = await self._open_position(strategy.id)
 
-        # 6. 신호 처리
-        order: Order | None = None
+        # 6. 신호 감지
         order_config: dict = strategy.order_config or {}
+        signal: str | None = None
+        triggered_conditions: list[str] = []
 
         if exit_result and exit_result.matched and open_qty > 0:
-            # 청산 신호
-            result["signal"] = "sell"
+            signal = "sell"
+            triggered_conditions = exit_result.triggered
+        elif entry_result and entry_result.matched and open_qty == 0:
+            signal = "buy"
+            triggered_conditions = entry_result.triggered
+
+        if signal is None:
+            return result
+
+        result["signal"] = signal
+
+        # 7. AI 자문 (advisory 모드)
+        ai_mode: int = strategy.ai_mode if isinstance(strategy.ai_mode, int) else _AI_OFF
+        if ai_mode == _AI_ADVISORY:
+            ai_result = await self._consult_ai(
+                strategy=strategy,
+                signal=signal,
+                triggered_conditions=triggered_conditions,
+                current_price=current_price,
+                ohlcv_df=ohlcv_df,
+            )
+            result["ai_recommendation"] = ai_result.get("recommendation")
+            if ai_result.get("recommendation") != "execute":
+                result["skipped_reason"] = (
+                    f"ai_advisory: {ai_result.get('recommendation')} "
+                    f"(confidence={ai_result.get('confidence', 0):.2f})"
+                )
+                return result
+
+        # 8. 리스크 한도 검사 (매수 신호에만 적용)
+        order: Order | None = None
+
+        if signal == "sell":
             order = await self.executor.execute_sell(
                 self.db,
                 strategy_id=strategy.id,
@@ -120,15 +153,11 @@ class TradingEngine:
                 order_type=order_config.get("order_type", "market"),
                 quantity=open_qty,
                 price=current_price if order_config.get("order_type") == "limit" else None,
-                trigger_source="signal",
+                trigger_source="signal" if ai_mode == _AI_OFF else "ai_advisory",
             )
-
-        elif entry_result and entry_result.matched and open_qty == 0:
-            # 진입 신호
+        else:  # buy
             balance_info = await self.adapter.fetch_balance()
-            available_usdt = float(
-                balance_info.get("free", {}).get("USDT", 0)
-            )
+            available_usdt = float(balance_info.get("free", {}).get("USDT", 0))
             max_pos = float(order_config.get("max_position_usdt", available_usdt))
             daily_limit = float(order_config.get("daily_limit_usdt", max_pos))
             today_traded = await self._today_traded(strategy.id)
@@ -150,7 +179,6 @@ class TradingEngine:
                 result["skipped_reason"] = "zero_quantity"
                 return result
 
-            result["signal"] = "buy"
             order = await self.executor.execute_buy(
                 self.db,
                 strategy_id=strategy.id,
@@ -159,17 +187,51 @@ class TradingEngine:
                 order_type=order_config.get("order_type", "market"),
                 quantity=qty,
                 price=current_price if order_config.get("order_type") == "limit" else None,
-                trigger_source="signal",
+                trigger_source="signal" if ai_mode == _AI_OFF else "ai_advisory",
             )
 
         if order:
             result["order_id"] = str(order.id)
             await self.db.commit()
-            # 일일 거래금액 Redis 카운터 갱신
             traded_usdt = float(order.quantity) * current_price
             await self._increment_today_traded(strategy.id, traded_usdt)
 
         return result
+
+    # ── AI 자문 ───────────────────────────────────────────────────────────────
+
+    async def _consult_ai(
+        self,
+        strategy: Strategy,
+        signal: str,
+        triggered_conditions: list[str],
+        current_price: float,
+        ohlcv_df: pd.DataFrame,
+    ) -> dict:
+        """AIService 를 통해 Claude API 자문을 요청합니다."""
+        try:
+            from app.services.ai_service import AIService
+
+            # 최근 5개 캔들을 시장 맥락으로 전달
+            recent = ohlcv_df.tail(5)[["open", "high", "low", "close", "volume"]]
+            market_context = recent.to_dict(orient="records")
+
+            svc = AIService()
+            return await svc.consult(
+                self.db,
+                strategy_id=strategy.id,
+                strategy_name=strategy.name,
+                symbol=strategy.symbol,
+                timeframe=strategy.timeframe,
+                signal=signal,
+                triggered_conditions=triggered_conditions,
+                current_price=current_price,
+                market_context={"recent_candles": market_context},
+            )
+        except Exception as exc:
+            logger.warning("AI consult failed, defaulting to execute: %s", exc)
+            # AI 자문 실패 시 advisory 모드에서는 신중하게 hold
+            return {"recommendation": "hold", "confidence": 0.0, "reasoning": str(exc)}
 
     # ── 헬퍼 ─────────────────────────────────────────────────────────────────
 
@@ -207,21 +269,17 @@ class TradingEngine:
         val = await redis_get(key)
         return float(val) if val else 0.0
 
-    async def _increment_today_traded(
-        self, strategy_id: uuid.UUID, amount: float
-    ) -> None:
+    async def _increment_today_traded(self, strategy_id: uuid.UUID, amount: float) -> None:
         from app.core.redis_client import redis_incr_float
         key = f"daily_traded:{strategy_id}:{datetime.now(timezone.utc).date()}"
         await redis_incr_float(key, amount, ex=86400)
 
     @staticmethod
     def _to_dataframe(raw: list) -> pd.DataFrame:
-        """ccxt OHLCV 리스트를 DataFrame 으로 변환합니다."""
         if not raw:
             return pd.DataFrame()
         df = pd.DataFrame(
             raw, columns=["timestamp", "open", "high", "low", "close", "volume"]
         )
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df = df.set_index("timestamp").sort_index()
-        return df.astype(float)
+        return df.set_index("timestamp").sort_index().astype(float)
