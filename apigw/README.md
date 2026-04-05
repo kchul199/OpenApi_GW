@@ -1,98 +1,217 @@
 # Open API Gateway (OAG)
 
-엔터프라이즈 환경을 위한 고성능, 다중 프로토콜(REST, gRPC, WebSocket) 지원 마이크로서비스 API 게이트웨이입니다. Python ASGI 프레임워크인 FastAPI를 기반으로 구축되었으며, 쿠버네티스 네이티브(Kubernetes-Native) 운영 환경에 최적화되어 있습니다.
+Open API Gateway는 FastAPI 기반의 멀티 프로토콜 API 게이트웨이입니다.  
+HTTP/REST, WebSocket, gRPC 트래픽을 단일 게이트웨이 계층에서 라우팅하고, 플러그인 방식으로 인증/레이트리밋/서킷브레이커/로깅을 적용할 수 있습니다.
 
-## 🌟 주요 특장점 (Features)
-- **Multi-Protocol 지원:** HTTP/REST, gRPC, WebSocket 트래픽을 단일 포트에서 핸들링.
-- **플러그인 아키텍처 (Plugin-based):** 인증(JWT, API Key, mTLS), 속도 제한(Rate Limit), 서킷 브레이커(Circuit Breaker), 로깅 등의 기능을 손쉽게 탈부착.
-- **분산 고가용성 (High Availability):** Redis Cluster 처리를 통한 인가 대기열 방어 및 클러스터 단위 서킷 브레이커.
-- **핫-리로드 동기화 (Hot-Reload):** 무중단(Zero-Downtime) 라우팅 룰 변경 (K8s ConfigMap + Redis Pub/Sub).
-- **관측성 (Observability):** OpenTelemetry 트레이싱 및 Prometheus 메트릭 수집 기본 제공.
+## 프로젝트 개요
 
----
+- 목적: 마이크로서비스 환경에서 API 경계(Edge) 계층을 표준화
+- 핵심 가치: 멀티 프로토콜, 플러그인 확장성, 운영 가시성, 런타임 라우트 관리
+- 운영 모델: Redis 기반 상태 공유 + Admin Control Plane + Observability 지표
 
-## 🚀 시작하기 (초보자 가이드)
+## 상세 설명
 
-### 1️⃣ 사전 요구사항 (Prerequisites)
-이 프로젝트를 실행하기 위해 시스템에 다음 프로그램이 설치되어 있어야 합니다.
-- **Python 3.11+**
-- **Docker & Docker Compose** (로컬 Redis 및 컨테이너 테스트 용도)
-- **Git**
+### 1) 데이터 플레인 (Gateway)
 
-### 2️⃣ 환경 구성 및 설치 (Installation)
-**1. 소스 코드 가져오기**
-```bash
-git clone https://github.com/kchul199/OpenApi_GW.git
-cd OpenApi_GW
+- HTTP/REST, WebSocket, gRPC 요청을 수신
+- `config/routes.yaml` 규칙으로 라우팅
+- 글로벌/라우트 플러그인을 체인으로 실행
+- 업스트림 선택 전략 지원
+  - `round_robin`
+  - `random`
+  - `ip_hash` (`hash_on`, `hash_key` 커스터마이징)
+
+### 2) 컨트롤 플레인 (Admin)
+
+- 웹 콘솔: `http://localhost:9000/ui`
+- 라우트 JSON 편집 + 폼 기반 Route Builder
+- 저장 전 Diff Preview
+- 라우트 변경 이력/롤백
+- Admin 키 관리(RBAC, 키 회전, 비활성화)
+
+### 3) 보안/운영 기능
+
+- Admin RBAC 역할
+  - `read`: 조회/검증/미리보기
+  - `write`: 생성/수정/삭제/롤백/리로드/키관리
+- 감사 로그 파일: `logs/admin_audit.log`
+- 변경 이력 파일: `config/route_history.json`
+- 키 저장소 파일: `config/admin_keys.json`
+- 메트릭/알람
+  - Gateway/Admin 액션 메트릭
+  - Prometheus 알람 룰: `deployments/monitoring/prometheus-alerts.yaml`
+
+## 주요 기능
+
+- 멀티 프로토콜 게이트웨이 (HTTP, WebSocket, gRPC)
+- 플러그인 아키텍처 (JWT, API Key, mTLS, Rate Limit, Circuit Breaker, Logging)
+- 라우트 런타임 리로드
+- Admin UI 기반 운영
+  - Route Editor
+  - Route Form Builder
+  - History / Rollback
+  - Admin Key Rotation
+- CI 품질 게이트
+  - `ruff`
+  - `mypy`
+  - `pytest`
+
+## 프로젝트 구조
+
+```text
+apigw/
+  admin/                      # Admin API + UI
+    static/                   # Admin 콘솔 프론트엔드
+  gateway/                    # 데이터 플레인 게이트웨이
+  config/
+    routes.yaml               # 라우팅 규칙
+    gateway.yaml              # 글로벌 플러그인 설정
+    admin_keys.json           # Admin 키 저장소(실행 중 생성)
+    route_history.json        # 라우트 변경 이력(실행 중 생성)
+  deployments/
+    docker-compose.yaml       # 로컬 실행 스택
+    monitoring/
+      prometheus-alerts.yaml  # 알람 룰
+  tests/
 ```
 
-**2. 가상환경 생성 및 의존성 설치**
-```bash
-python -m venv venv
-source venv/bin/activate  # Mac/Linux 의 경우
-# Windows의 경우: venv\Scripts\activate
+## 설치 방법
 
+### 사전 요구사항
+
+- Python 3.11+
+- Docker / Docker Compose
+- Git
+
+### 설치
+
+```bash
+git clone https://github.com/kchul199/OpenApi_GW.git
+cd OpenApi_GW/apigw
+
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**3. 로컬 Redis 실행**
-게이트웨이의 핵심 기능(Rate Limiting 등)은 Redis를 필수로 요구합니다. Docker를 활용해 실행합니다.
+## 실행 방법
+
+### 1) Redis 실행
+
 ```bash
-docker-compose up -d redis
+docker compose -f deployments/docker-compose.yaml up -d redis
 ```
 
-### 3️⃣ 게이트웨이 실행하기 (Running the Gateway)
-아래 명령어를 통해 메인 게이트웨이 서버와 어드민 관리자 통합 API 서버를 실행합니다.
+### 2) Gateway 실행 (HTTP 8080, gRPC 9090)
+
 ```bash
-# gateway 디렉토리로 이동하여 서버 구동 (기본 포트 8080)
 python -m gateway.main
 ```
-실행이 완료되면 아래와 같은 로그가 출력됩니다.
-* `HTTP started on 8080`
-* `gRPC Proxy started on 9090`
-* `Admin API started on 9000`
 
----
+### 3) Admin 실행 (9000)
 
-## 🧪 테스트 및 검증 (Testing)
+```bash
+python -m admin.main
+```
 
-### 1) 게이트웨이 기본 헬스체크 (Liveness)
-게이트웨이 서버와 Redis 연결 상태를 점검합니다.
+### 4) 기본 확인
+
 ```bash
 curl http://localhost:8080/_health
-# 정상 응답: {"status": "ok", "routes": <라우트개수>, "redis": "ok"}
+curl -H "X-Admin-Key: changeme-admin-key" http://localhost:9000/api/v1/dashboard
 ```
 
-### 2) 테스트 모의 서버(Mock Server) 띄우기
-게이트웨이가 트래픽을 포워딩할 가짜 서버(HTTP)를 띄워봅시다. 폴더를 열고 분리된 터미널 탭에서 다음을 실행합니다.
+### 5) 관리 화면 접속
+
+- URL: `http://localhost:9000/ui`
+- 기본 Admin Key: `changeme-admin-key`
+
+## 환경설정
+
+주요 설정은 `gateway/config/settings.py` 기준이며, `.env` 또는 환경변수로 주입할 수 있습니다.
+
+### 자주 쓰는 환경변수
+
+- `ADMIN__API_KEY`
+- `ADMIN__READ_API_KEYS` (쉼표 구분)
+- `ADMIN__WRITE_API_KEYS` (쉼표 구분)
+- `ADMIN__KEY_STORE_FILE`
+- `ADMIN__AUDIT_LOG_FILE`
+- `ADMIN__ROUTE_HISTORY_FILE`
+- `ROUTES_CONFIG`
+- `GATEWAY_CONFIG`
+- `REDIS__URL`
+- `OBSERVABILITY__METRICS_ENABLED`
+- `OBSERVABILITY__METRICS_PATH`
+- `OBSERVABILITY__TRACING_ENABLED`
+
+## 테스트 / 검증
+
 ```bash
-python -m http.server 8081
+ruff check gateway admin tests
+mypy gateway admin tests
+pytest -q
 ```
 
-### 3) 통신 라우팅 테스트
-기본적으로 `config/routes.yaml` 설정 파일에 라우팅 규칙이 정의됩니다. `/mock/` 경로를 `http://localhost:8081`로 보내도록 라우팅이 되어있다고 가정하면, 게이트웨이(8080)를 통해 8081로 접근할 수 있습니다.
+특정 관리화면 흐름만 빠르게 확인하려면:
+
 ```bash
-curl http://localhost:8080/mock/
-# 응답 파일 목록 출력
+pytest -q tests/unit/test_admin_app.py tests/e2e/test_admin_console_flow.py
 ```
 
-### 4) 어드민 API 조작 (라우트 리로드)
-Config 파일(`config/routes.yaml`)을 편집하여 새로운 룰을 저장한 후, 서버 재시작 없이 무중단으로 설정을 갱신하려면 어드민 포트를 호출합니다.
+## 트러블 슈팅
+
+### 1) `Redis connection` 오류
+
+증상:
+
+```text
+Failed to connect to Redis
+Error connecting to localhost:6379
+```
+
+해결:
+
+1. `docker compose -f deployments/docker-compose.yaml up -d redis` 실행
+2. `docker ps`에서 `oag-redis` 상태 확인
+3. `REDIS__URL` 값 확인 (`redis://localhost:6379/0`)
+
+### 2) Admin API `401` / `403`
+
+- `401`: 키가 없거나 잘못됨
+- `403`: 키는 유효하지만 `write` 권한이 필요한 작업
+
+확인 포인트:
+
+1. `X-Admin-Key` 헤더 전달 여부
+2. 키 역할(`read`/`write`)
+3. 키 비활성화 여부 (`/api/v1/admin/keys`)
+
+### 3) 저장 후 `config/routes.yaml` 포맷이 바뀜
+
+- Admin 저장 API는 YAML을 표준 포맷으로 재직렬화합니다.
+- 의미 차이가 아닌 포맷 차이일 수 있으므로 Diff를 기준으로 확인하세요.
+
+### 4) 포트 충돌 (`8080`, `9000`, `9090`, `6379`)
+
 ```bash
-# _key는 settings.py 또는 환경변수로 설정된 Admin API Key입니다. (기본값: changeme-admin-key)
-curl -X POST "http://localhost:9000/api/v1/reload?_key=changeme-admin-key"
+lsof -i :8080 -i :9000 -i :9090 -i :6379
 ```
 
-### 5) 성능 및 부하 테스트 (K6)
-대규모 트래픽 부하 검증을 원하신다면 K6 툴킷을 활용하세요.
-```bash
-k6 run tests/load/rest_load_test.js
-```
+충돌 프로세스를 정리하거나 포트를 변경하세요.
 
----
+### 5) 메트릭이 보이지 않음
 
-## 📚 추가 문서 자료
-시스템 내부 설계와 플러그인 상세 개발 스펙을 알고 싶으시다면 `docs/` 폴더 내의 산출물을 참조해 주세요!
-- 🏛️ [아키텍처 설계서 (Architecture)](docs/architecture.md)
-- 🔌 [API 연동 및 플러그인 규격서 (API Specs)](docs/api_spec.md)
-- 🐳 [쿠버네티스 운영 가이드 (K8s Deploy)](deployments/kubernetes/README.md)
+1. `OBSERVABILITY__METRICS_ENABLED=true`
+2. `OBSERVABILITY__METRICS_PATH` 확인 (기본 `/metrics`)
+3. Prometheus 스크랩 타겟 경로 확인
+
+## 문서
+
+- 아키텍처: [docs/architecture.md](docs/architecture.md)
+- API 스펙: [docs/api_spec.md](docs/api_spec.md)
+- Kubernetes 배포: [deployments/kubernetes/README.md](deployments/kubernetes/README.md)
+
+## 라이선스
+
+MIT
