@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OAG Admin Console</title>
+    <link rel="stylesheet" href="/ui/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb bg-orb-left"></div>
+    <div class="bg-orb bg-orb-right"></div>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Open API Gateway</p>
+          <h1>API 관리 화면</h1>
+          <p class="hero-copy">
+            라우트, 프로토콜 분포, 플러그인 적용 현황을 한 화면에서 보고 즉시
+            리로드할 수 있는 운영 콘솔입니다.
+          </p>
+        </div>
+        <section class="connect-panel">
+          <label class="field">
+            <span>Admin Key</span>
+            <input id="admin-key" type="password" placeholder="X-Admin-Key" />
+          </label>
+          <div class="actions">
+            <button id="refresh-button" class="button button-primary">새로고침</button>
+            <button id="reload-button" class="button button-secondary">설정 리로드</button>
+          </div>
+          <p id="status-line" class="status-line">연결 전</p>
+        </section>
+      </header>
+
+      <section class="dashboard-grid">
+        <article class="card stat-card">
+          <p class="card-label">Routes</p>
+          <strong id="route-count" class="stat-value">-</strong>
+          <p class="card-foot">현재 게이트웨이에 등록된 라우트 수</p>
+        </article>
+        <article class="card stat-card">
+          <p class="card-label">Upstreams</p>
+          <strong id="upstream-count" class="stat-value">-</strong>
+          <p class="card-foot">활성 업스트림 타깃 총합</p>
+        </article>
+        <article class="card stat-card">
+          <p class="card-label">Global Plugins</p>
+          <strong id="global-plugin-count" class="stat-value">-</strong>
+          <p class="card-foot">전역 플러그인 적용 수</p>
+        </article>
+        <article class="card stat-card">
+          <p class="card-label">Configured Plugins</p>
+          <strong id="configured-plugin-count" class="stat-value">-</strong>
+          <p class="card-foot">라우트 단위 플러그인 종류 수</p>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <article class="card surface">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Control</p>
+              <h2>Route Inventory</h2>
+            </div>
+            <div class="filters">
+              <input id="route-search" type="search" placeholder="라우트 검색" />
+              <select id="protocol-filter">
+                <option value="ALL">전체 프로토콜</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Route</th>
+                  <th>Protocol</th>
+                  <th>Path</th>
+                  <th>Targets</th>
+                  <th>Plugins</th>
+                </tr>
+              </thead>
+              <tbody id="routes-table"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <aside class="panel-stack">
+          <article class="card surface">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Visibility</p>
+                <h2>Protocol Mix</h2>
+              </div>
+            </div>
+            <div id="protocol-pills" class="pill-grid"></div>
+          </article>
+
+          <article class="card surface">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Coverage</p>
+                <h2>Plugin Footprint</h2>
+              </div>
+            </div>
+            <ul id="plugin-usage" class="plugin-list"></ul>
+          </article>
+
+          <article class="card surface">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Studio</p>
+                <h2>Route Editor</h2>
+              </div>
+            </div>
+            <div id="route-meta" class="route-meta">
+              라우트를 선택하거나 새 라우트를 만들어 JSON으로 편집할 수 있습니다.
+            </div>
+            <div class="editor-actions">
+              <button id="new-route-button" class="button button-ghost">새 라우트</button>
+              <button id="format-route-button" class="button button-ghost">포맷</button>
+              <button id="sync-form-button" class="button button-ghost">폼 동기화</button>
+              <button id="apply-form-button" class="button button-ghost">폼 적용</button>
+              <button id="validate-route-button" class="button button-primary">검증</button>
+              <button id="save-route-button" class="button button-secondary">저장</button>
+              <button id="delete-route-button" class="button button-danger">삭제</button>
+            </div>
+            <div class="form-grid">
+              <label class="field compact-field">
+                <span>Route ID</span>
+                <input id="form-route-id" type="text" placeholder="user-service-v1" />
+              </label>
+              <label class="field compact-field">
+                <span>Description</span>
+                <input id="form-route-description" type="text" placeholder="route description" />
+              </label>
+              <label class="field compact-field">
+                <span>Protocol</span>
+                <select id="form-route-protocol">
+                  <option value="HTTP">HTTP</option>
+                  <option value="GRPC">GRPC</option>
+                  <option value="WEBSOCKET">WEBSOCKET</option>
+                </select>
+              </label>
+              <label class="field compact-field">
+                <span>Upstream Type</span>
+                <select id="form-upstream-type">
+                  <option value="REST">REST</option>
+                  <option value="GRPC">GRPC</option>
+                  <option value="WEBSOCKET">WEBSOCKET</option>
+                </select>
+              </label>
+              <label class="field compact-field">
+                <span>Path</span>
+                <input id="form-route-path" type="text" placeholder="/api/v1/users/**" />
+              </label>
+              <label class="field compact-field">
+                <span>Methods (comma)</span>
+                <input id="form-route-methods" type="text" placeholder="GET,POST,PUT" />
+              </label>
+              <label class="field compact-field">
+                <span>Target URL</span>
+                <input id="form-target-url" type="text" placeholder="http://service:8000" />
+              </label>
+              <label class="field compact-field">
+                <span>Target Weight</span>
+                <input id="form-target-weight" type="number" min="1" value="100" />
+              </label>
+              <label class="field compact-field">
+                <span>Load Balance</span>
+                <select id="form-load-balance">
+                  <option value="round_robin">round_robin</option>
+                  <option value="random">random</option>
+                  <option value="ip_hash">ip_hash</option>
+                </select>
+              </label>
+              <label class="field compact-field">
+                <span>Plugins (comma)</span>
+                <input id="form-plugins" type="text" placeholder="jwt-validator,rate-limiter" />
+              </label>
+            </div>
+            <textarea
+              id="route-editor"
+              class="json-editor"
+              spellcheck="false"
+            ></textarea>
+          </article>
+
+          <article class="card surface">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Preview</p>
+                <h2>Diff Preview</h2>
+              </div>
+            </div>
+            <div id="route-diff-meta" class="route-meta">
+              검증을 실행하면 저장 전 변경 diff를 확인할 수 있습니다.
+            </div>
+            <pre id="route-diff" class="json-viewer">No changes</pre>
+          </article>
+
+          <article class="card surface">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">History</p>
+                <h2>Route Changes</h2>
+              </div>
+              <button id="refresh-history-button" class="button button-ghost">이력 새로고침</button>
+            </div>
+            <div class="table-wrap history-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Action</th>
+                    <th>Route</th>
+                    <th>Actor</th>
+                    <th>Rollback</th>
+                  </tr>
+                </thead>
+                <tbody id="history-table"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="card surface">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Security</p>
+                <h2>Admin Keys</h2>
+              </div>
+              <button id="refresh-keys-button" class="button button-ghost">키 새로고침</button>
+            </div>
+            <div class="key-actions">
+              <label class="field compact-field">
+                <span>Role</span>
+                <select id="rotate-key-role">
+                  <option value="write">write</option>
+                  <option value="read">read</option>
+                </select>
+              </label>
+              <label class="field compact-field">
+                <span>Label</span>
+                <input id="rotate-key-label" type="text" placeholder="rotation note" />
+              </label>
+              <button id="rotate-key-button" class="button button-primary">키 회전</button>
+            </div>
+            <div id="new-key-box" class="key-box hidden">
+              <p class="card-foot">새 키는 한 번만 표시됩니다.</p>
+              <pre id="new-key-value" class="json-viewer small-viewer"></pre>
+            </div>
+            <div class="table-wrap history-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Key ID</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Deactivate</th>
+                  </tr>
+                </thead>
+                <tbody id="keys-table"></tbody>
+              </table>
+            </div>
+          </article>
+        </aside>
+      </section>
+    </main>
+    <script src="/ui/static/app.js" defer></script>
+  </body>
+</html>

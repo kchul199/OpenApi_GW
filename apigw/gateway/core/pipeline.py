@@ -9,7 +9,6 @@ Each plugin calls `await next(request, ctx)` to proceed.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from fastapi import Request, Response
 
@@ -54,7 +53,7 @@ def _build_chain(plugins: list[BasePlugin], endpoint: NextFunc) -> NextFunc:
 class MiddlewarePipeline:
     """
     Builds and executes the middleware plugin chain for a single request.
-    
+
     Usage:
         pipeline = MiddlewarePipeline(global_plugins)
         response = await pipeline.execute(request, ctx, route_plugins, proxy_handler)
@@ -90,7 +89,7 @@ class MiddlewarePipeline:
           global plugins → route-specific plugins → proxy_handler
         """
         global_plugins = self._instantiate_plugins(self._global_configs)
-        route_plugins  = self._instantiate_plugins(route_plugin_configs)
+        route_plugins = self._instantiate_plugins(route_plugin_configs)
         all_plugins = global_plugins + route_plugins
 
         chain = _build_chain(all_plugins, proxy_handler)

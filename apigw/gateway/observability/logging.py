@@ -3,9 +3,9 @@ Observability: structured logging setup using Python logging + JSON formatter.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import logging
 import sys
-from datetime import datetime, timezone
 
 import orjson
 
@@ -14,19 +14,35 @@ class _JSONFormatter(logging.Formatter):
     """Outputs log records as single-line JSON objects."""
 
     def format(self, record: logging.LogRecord) -> str:
-        payload: dict = {
-            "time":    datetime.now(tz=timezone.utc).isoformat(),
-            "level":   record.levelname,
-            "logger":  record.name,
+        payload: dict[str, object] = {
+            "time": datetime.now(tz=UTC).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
             "message": record.getMessage(),
         }
         # Attach extra fields set via extra={}
         for key, val in record.__dict__.items():
             if key not in (
-                "name", "msg", "args", "created", "filename", "funcName",
-                "levelname", "levelno", "lineno", "module", "msecs",
-                "pathname", "process", "processName", "relativeCreated",
-                "stack_info", "thread", "threadName", "exc_info", "exc_text",
+                "name",
+                "msg",
+                "args",
+                "created",
+                "filename",
+                "funcName",
+                "levelname",
+                "levelno",
+                "lineno",
+                "module",
+                "msecs",
+                "pathname",
+                "process",
+                "processName",
+                "relativeCreated",
+                "stack_info",
+                "thread",
+                "threadName",
+                "exc_info",
+                "exc_text",
                 "message",
             ):
                 payload[key] = val

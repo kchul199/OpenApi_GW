@@ -3,10 +3,12 @@ Built-in plugins:
   - RequestIDPlugin  : Injects X-Request-ID into context and response
   - LoggingPlugin    : Structured request/response logging
 """
+
 from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from fastapi import Request, Response
 
@@ -48,14 +50,14 @@ class LoggingPlugin(BasePlugin):
     name = "access-logger"
     order = 2
 
-    def configure(self, config: dict) -> None:
+    def configure(self, config: dict[str, Any]) -> None:
         self._log_headers: bool = config.get("log_headers", False)
-        self._log_body: bool    = config.get("log_body", False)
+        self._log_body: bool = config.get("log_body", False)
 
     async def __call__(self, request: Request, ctx: GatewayContext, next: NextFunc) -> Response:
         start = time.monotonic()
 
-        extra: dict = {
+        extra: dict[str, Any] = {
             "request_id": ctx.request_id,
             "method": request.method,
             "path": request.url.path,

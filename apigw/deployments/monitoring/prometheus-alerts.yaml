@@ -1,0 +1,48 @@
+groups:
+  - name: oag-gateway-alerts
+    interval: 30s
+    rules:
+      - alert: OAGAdminAuthFailuresHigh
+        expr: sum(rate(admin_auth_failures_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          service: open-api-gateway
+        annotations:
+          summary: "Admin 인증 실패율이 높습니다"
+          description: "최근 5분 기준 admin_auth_failures_total 증가율이 임계치를 초과했습니다."
+
+      - alert: OAGAdminRouteMutationSpike
+        expr: sum(rate(admin_actions_total{action=~"route_create|route_update|route_delete|route_rollback"}[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          service: open-api-gateway
+        annotations:
+          summary: "Route 변경 작업이 급증했습니다"
+          description: "관리자 route 변경 작업이 평소보다 많습니다. 의도된 배포인지 확인하세요."
+
+      - alert: OAGGatewayAuthFailuresHigh
+        expr: sum(rate(gateway_auth_failures_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: open-api-gateway
+        annotations:
+          summary: "Gateway 인증 실패율이 높습니다"
+          description: "플러그인 인증 실패 요청이 증가했습니다. 공격 트래픽 또는 설정 오류 가능성이 있습니다."
+
+      - alert: OAGGatewayErrorRateHigh
+        expr: |
+          (
+            sum(rate(gateway_requests_total{status_code=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(gateway_requests_total[5m])), 1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          service: open-api-gateway
+        annotations:
+          summary: "Gateway 5xx 비율이 높습니다"
+          description: "최근 5분 기준 5xx 비율이 5%를 초과했습니다."

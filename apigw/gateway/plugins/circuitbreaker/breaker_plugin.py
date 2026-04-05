@@ -1,21 +1,30 @@
 """
 Circuit Breaker Plugin.
-Wraps upstream calls in a circuit breaker state machine:
-  CLOSED → (failure threshold exceeded) → OPEN → (timeout) → HALF_OPEN → CLOSED/OPEN
+Wraps upstream calls in a circuit breaker state machine.
+
+Current implementation: 2-state (CLOSED ↔ OPEN) via Redis TTL.
+  CLOSED → (failure_threshold failures in window_seconds) → OPEN
+  OPEN   → (recovery_timeout expires) → CLOSED (automatic)
+
+Tech Debt: HALF_OPEN probe state not yet implemented.
+  Full 3-state (CLOSED → OPEN → HALF_OPEN → CLOSED/OPEN) is tracked
+  as a future improvement. See workfoot.md §Tech Debt.
 
 Config keys:
-  failure_threshold  (int)   : consecutive failures to open circuit (default: 5)
-  recovery_timeout   (float) : seconds before attempting recovery (default: 30)
-  success_threshold  (int)   : successes in HALF_OPEN to close circuit (default: 2)
+  failure_threshold  (int)   : failures within window to open circuit (default: 5)
+  recovery_timeout   (float) : seconds circuit stays OPEN before auto-reset (default: 30)
+  window_seconds     (int)   : sliding failure counting window in seconds (default: 60)
 """
-import asyncio
+
+from __future__ import annotations
+
 import logging
-from enum import Enum
+from typing import Any
 
 from fastapi import Request, Response
 
 from gateway.core.context import GatewayContext
-from gateway.core.redis import get_redis
+from gateway.core.redis import RedisClient, get_redis
 from gateway.plugins.base import BasePlugin, NextFunc, PluginRegistry
 
 logger = logging.getLogger(__name__)
@@ -26,18 +35,19 @@ class CircuitBreakerPlugin(BasePlugin):
     """
     Redis-backed Distributed Circuit Breaker.
     """
+
     name = "circuit-breaker"
     order = 25
 
-    def configure(self, config: dict) -> None:
-        self._failure_threshold: int   = config.get("failure_threshold", 5)
-        self._recovery_timeout: float  = config.get("recovery_timeout", 30.0)
-        self._window_seconds: int      = config.get("window_seconds", 60)
+    def configure(self, config: dict[str, Any]) -> None:
+        self._failure_threshold: int = config.get("failure_threshold", 5)
+        self._recovery_timeout: float = config.get("recovery_timeout", 30.0)
+        self._window_seconds: int = config.get("window_seconds", 60)
 
     async def __call__(self, request: Request, ctx: GatewayContext, next: NextFunc) -> Response:
         redis = get_redis()
         route_id = ctx.route_id
-        
+
         open_key = f"cb:open:{route_id}"
         fails_key = f"cb:fails:{route_id}"
 
@@ -46,7 +56,9 @@ class CircuitBreakerPlugin(BasePlugin):
         if is_open:
             ctx.circuit_open = True
             ttl = await redis.ttl(open_key)
-            logger.warning(f"Circuit OPEN globally for route={route_id}", extra={"request_id": ctx.request_id})
+            logger.warning(
+                f"Circuit OPEN globally for route={route_id}", extra={"request_id": ctx.request_id}
+            )
             return Response(
                 content='{"detail":"Service temporarily unavailable (circuit open)"}',
                 status_code=503,
@@ -69,7 +81,13 @@ class CircuitBreakerPlugin(BasePlugin):
             await self._record_failure(redis, route_id, open_key, fails_key)
             raise
 
-    async def _record_failure(self, redis, route_id: str, open_key: str, fails_key: str):
+    async def _record_failure(
+        self,
+        redis: RedisClient,
+        route_id: str,
+        open_key: str,
+        fails_key: str,
+    ) -> None:
         # Increment failures
         current_fails = await redis.incr(fails_key)
         # Set expiry for the failure window if it's the first failure
@@ -82,4 +100,6 @@ class CircuitBreakerPlugin(BasePlugin):
             await redis.set(open_key, "1", ex=int(self._recovery_timeout))
             # Clear or leave the fails_key to block further processing
             await redis.delete(fails_key)
-            logger.error(f"Circuit breached for route={route_id}! Opening circuit for {self._recovery_timeout}s.")
+            logger.error(
+                f"Circuit breached for route={route_id}! Opening circuit for {self._recovery_timeout}s."
+            )

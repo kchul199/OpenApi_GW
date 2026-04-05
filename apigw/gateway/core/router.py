@@ -8,11 +8,13 @@ Matches incoming requests to RouteConfig entries using:
 
 Routes are evaluated in declaration order; first match wins.
 """
+
 from __future__ import annotations
 
+from collections import defaultdict
+from fnmatch import fnmatch
 import logging
 import re
-from fnmatch import fnmatch
 
 from fastapi import Request
 
@@ -63,18 +65,28 @@ class RoutingEngine:
 
     def __init__(self) -> None:
         self._routes: list[RouteConfig] = []
+        self._round_robin_counters: dict[str, int] = defaultdict(int)
 
     def update_routes(self, routes: list[RouteConfig]) -> None:
         self._routes = list(routes)
+        active_ids = {route.id for route in routes}
+        self._round_robin_counters = defaultdict(
+            int,
+            {
+                route_id: counter
+                for route_id, counter in self._round_robin_counters.items()
+                if route_id in active_ids
+            },
+        )
         logger.info(f"Routing table updated: {len(self._routes)} routes")
 
     def match(self, request: Request) -> RouteConfig | None:
         """Return the first matching RouteConfig, or None."""
         protocol = _protocol_from_request(request)
-        path     = request.url.path
-        method   = request.method.upper()
-        host     = request.headers.get("host", "")
-        headers  = dict(request.headers)
+        path = request.url.path
+        method = request.method.upper()
+        host = request.headers.get("host", "")
+        headers = dict(request.headers)
 
         for route in self._routes:
             m = route.match
@@ -105,28 +117,62 @@ class RoutingEngine:
         logger.debug(f"No route matched for {method} {path}")
         return None
 
+    def match_grpc(
+        self,
+        path: str,
+        host: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> RouteConfig | None:
+        """
+        Match a gRPC request directly by path/host/headers.
+        Used by GenericGRPCProxy which does not have a Starlette Request object.
+        """
+        headers = headers or {}
+        for route in self._routes:
+            m = route.match
+            if m.protocol.upper() != Protocol.GRPC.value.upper():
+                continue
+            if m.host and m.host not in (host, "*"):
+                continue
+            if not _match_path(m.path, path):
+                continue
+            if m.headers and not _match_headers(m.headers, headers):
+                continue
+            logger.debug(f"gRPC route matched: {route.id} for {path}")
+            return route
+        logger.debug(f"No gRPC route matched for {path}")
+        return None
+
     def resolve_upstream(self, route: RouteConfig, ctx: GatewayContext) -> UpstreamInfo | None:
         """
         Select an upstream target using the route's load-balance strategy.
-        Currently implements: round_robin, random.
+        Supports: round_robin, random, ip_hash.
         """
         targets = route.upstream.targets
         if not targets:
             return None
 
         strategy = route.upstream.load_balance
+
         if strategy == "random":
             import random
+
             target = random.choices(targets, weights=[t.weight for t in targets], k=1)[0]
+        elif strategy == "ip_hash":
+            hash_key = ctx.upstream_hash_key or ctx.rate_limit_key or ctx.request_id
+            idx = hash(hash_key) % len(targets)
+            target = targets[idx]
         else:
-            # Round-robin using route_id hash on request_id for stateless distribution
-            idx = hash(ctx.request_id) % len(targets)
+            idx = self._round_robin_counters[route.id] % len(targets)
+            self._round_robin_counters[route.id] += 1
             target = targets[idx]
 
         return UpstreamInfo(
             url=target.url,
-            protocol=Protocol[route.upstream.type.upper()
-                              if route.upstream.type.upper() in Protocol.__members__
-                              else "HTTP"],
+            protocol=Protocol[
+                route.upstream.type.upper()
+                if route.upstream.type.upper() in Protocol.__members__
+                else "HTTP"
+            ],
             weight=target.weight,
         )
