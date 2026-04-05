@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
+import re
 from typing import Any, cast
 
 from pydantic import BaseModel, Field, field_validator
 import yaml  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
+_ENV_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 
 
 # ─── Route Model ──────────────────────────────────────────────────────────────
@@ -123,6 +126,35 @@ class ConfigLoader:
         self._gateway_cfg: GatewayConfig = GatewayConfig()
         self._lock = asyncio.Lock()
 
+    @staticmethod
+    def _expand_env_text(value: str, *, source: Path) -> str:
+        def _replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            default = match.group(2)
+            resolved = os.environ.get(name)
+            if resolved is not None:
+                return resolved
+            if default is not None:
+                return default
+            raise ValueError(
+                f"Missing required environment variable '{name}' while loading {source}"
+            )
+
+        return _ENV_PLACEHOLDER_RE.sub(_replace, value)
+
+    @classmethod
+    def _expand_env_payload(cls, value: Any, *, source: Path) -> Any:
+        if isinstance(value, str):
+            return cls._expand_env_text(value, source=source)
+        if isinstance(value, list):
+            return [cls._expand_env_payload(item, source=source) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: cls._expand_env_payload(item, source=source)
+                for key, item in value.items()
+            }
+        return value
+
     async def load(self) -> None:
         """Initial load of all configuration files."""
         async with self._lock:
@@ -137,14 +169,16 @@ class ConfigLoader:
         if not self._routes_path.exists():
             logger.warning(f"Routes config not found: {self._routes_path}")
             return []
-        raw: dict[str, Any] = yaml.safe_load(self._routes_path.read_text(encoding="utf-8")) or {}
+        raw_loaded = yaml.safe_load(self._routes_path.read_text(encoding="utf-8")) or {}
+        raw = cast(dict[str, Any], self._expand_env_payload(raw_loaded, source=self._routes_path))
         return [RouteConfig(**r) for r in raw.get("routes", [])]
 
     def _load_gateway(self) -> GatewayConfig:
         if not self._gateway_path.exists():
             logger.warning(f"Gateway config not found: {self._gateway_path}")
             return GatewayConfig()
-        raw: dict[str, Any] = yaml.safe_load(self._gateway_path.read_text(encoding="utf-8")) or {}
+        raw_loaded = yaml.safe_load(self._gateway_path.read_text(encoding="utf-8")) or {}
+        raw = cast(dict[str, Any], self._expand_env_payload(raw_loaded, source=self._gateway_path))
         return GatewayConfig(**raw)
 
     async def reload(self) -> None:

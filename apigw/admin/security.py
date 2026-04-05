@@ -5,7 +5,7 @@ Admin API key management with role-based authorization.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -72,6 +72,7 @@ class AdminKeyStore:
                     "role": "write",
                     "active": True,
                     "created_at": now,
+                    "expires_at": None,
                     "secret_sha256": self._hash_secret(secret),
                 }
             )
@@ -86,16 +87,34 @@ class AdminKeyStore:
                     "role": "read",
                     "active": True,
                     "created_at": now,
+                    "expires_at": None,
                     "secret_sha256": self._hash_secret(secret),
                 }
             )
         self._keys = bootstrap_records
         self._persist()
 
+    @staticmethod
+    def _is_expired(record: dict[str, Any], now: datetime | None = None) -> bool:
+        expires_at_raw = record.get("expires_at")
+        if not expires_at_raw:
+            return False
+        try:
+            expires_at = datetime.fromisoformat(str(expires_at_raw))
+        except ValueError:
+            # Corrupted timestamp should fail closed.
+            return True
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        current = now or datetime.now(tz=UTC)
+        return current >= expires_at
+
     def authenticate(self, secret: str) -> AdminPrincipal | None:
         digest = self._hash_secret(secret)
         for record in self._keys:
             if not record.get("active", False):
+                continue
+            if self._is_expired(record):
                 continue
             if record.get("secret_sha256") != digest:
                 continue
@@ -120,23 +139,39 @@ class AdminKeyStore:
                 "role": str(record.get("role", "read")),
                 "active": bool(record.get("active", False)),
                 "created_at": str(record.get("created_at", "")),
+                "expires_at": str(record.get("expires_at") or ""),
+                "expired": self._is_expired(record),
             }
             for record in self._keys
         ]
 
-    def create_key(self, role: AdminRole, label: str = "") -> dict[str, str]:
+    def create_key(
+        self,
+        role: AdminRole,
+        label: str = "",
+        expires_in_seconds: int | None = None,
+    ) -> dict[str, str]:
         plaintext = secrets.token_urlsafe(32)
+        expires_at = None
+        if expires_in_seconds is not None and expires_in_seconds > 0:
+            expires_at = (datetime.now(tz=UTC) + timedelta(seconds=expires_in_seconds)).isoformat()
         record = {
             "id": f"key-{uuid4().hex[:12]}",
             "label": label.strip() or "rotated-key",
             "role": role,
             "active": True,
             "created_at": datetime.now(tz=UTC).isoformat(),
+            "expires_at": expires_at,
             "secret_sha256": self._hash_secret(plaintext),
         }
         self._keys.append(record)
         self._persist()
-        return {"id": str(record["id"]), "role": role, "secret": plaintext}
+        return {
+            "id": str(record["id"]),
+            "role": role,
+            "secret": plaintext,
+            "expires_at": str(record.get("expires_at") or ""),
+        }
 
     def deactivate_key(self, key_id: str) -> bool:
         changed = False

@@ -243,6 +243,10 @@
                 <span>Label</span>
                 <input id="rotate-key-label" type="text" placeholder="rotation note" />
               </label>
+              <label class="field compact-field">
+                <span>TTL (sec)</span>
+                <input id="rotate-key-ttl" type="number" min="1" placeholder="옵션: 3600" />
+              </label>
               <button id="rotate-key-button" class="button button-primary">키 회전</button>
             </div>
             <div id="new-key-box" class="key-box hidden">
@@ -257,6 +261,7 @@
                     <th>Role</th>
                     <th>Status</th>
                     <th>Created</th>
+                    <th>Expires</th>
                     <th>Deactivate</th>
                   </tr>
                 </thead>

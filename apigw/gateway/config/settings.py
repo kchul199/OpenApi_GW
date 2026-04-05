@@ -48,6 +48,22 @@ class AdminSettings(BaseSettings):
     api_key: str = Field(default="changeme-admin-key", description="Admin API 접근 키")
     read_api_keys: str = Field(default="", description="쉼표 구분 read 전용 API 키 목록")
     write_api_keys: str = Field(default="", description="쉼표 구분 write API 키 목록")
+    allowed_ips: str = Field(
+        default="",
+        description="쉼표 구분 허용 IP/CIDR 목록(비우면 전체 허용)",
+    )
+    trust_proxy_headers: bool = Field(
+        default=True,
+        description="X-Forwarded-For 헤더를 신뢰할지 여부",
+    )
+    max_write_actions_per_minute: int = Field(
+        default=120,
+        description="관리 write 액션 분당 허용 수(0 이하이면 제한 비활성)",
+    )
+    default_key_ttl_seconds: int = Field(
+        default=0,
+        description="회전 키 기본 만료 시간(초, 0이면 만료 없음)",
+    )
     key_store_file: str = "config/admin_keys.json"
     audit_log_file: str = "logs/admin_audit.log"
     route_history_file: str = "config/route_history.json"

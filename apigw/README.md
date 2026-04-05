@@ -39,7 +39,7 @@ HTTP/REST, WebSocket, gRPC 트래픽을 단일 게이트웨이 계층에서 라�
 - 키 저장소 파일: `config/admin_keys.json`
 - 메트릭/알람
   - Gateway/Admin 액션 메트릭
-  - Prometheus 알람 룰: `deployments/monitoring/prometheus-alerts.yaml`
+  - Prometheus 알람 룰: `deployments/monitoring/prometheus-rules.yaml`
 
 ## 주요 기능
 
@@ -71,7 +71,7 @@ apigw/
   deployments/
     docker-compose.yaml       # 로컬 실행 스택
     monitoring/
-      prometheus-alerts.yaml  # 알람 룰
+      prometheus-rules.yaml   # 알람 룰
   tests/
 ```
 
@@ -135,6 +135,9 @@ curl -H "X-Admin-Key: changeme-admin-key" http://localhost:9000/api/v1/dashboard
 - `ADMIN__API_KEY`
 - `ADMIN__READ_API_KEYS` (쉼표 구분)
 - `ADMIN__WRITE_API_KEYS` (쉼표 구분)
+- `ADMIN__ALLOWED_IPS` (쉼표 구분 CIDR/IP)
+- `ADMIN__MAX_WRITE_ACTIONS_PER_MINUTE`
+- `ADMIN__DEFAULT_KEY_TTL_SECONDS`
 - `ADMIN__KEY_STORE_FILE`
 - `ADMIN__AUDIT_LOG_FILE`
 - `ADMIN__ROUTE_HISTORY_FILE`
@@ -210,7 +213,9 @@ lsof -i :8080 -i :9000 -i :9090 -i :6379
 
 - 아키텍처: [docs/architecture.md](docs/architecture.md)
 - API 스펙: [docs/api_spec.md](docs/api_spec.md)
+- 운영 Runbook: [docs/operations_runbook.md](docs/operations_runbook.md)
 - Kubernetes 배포: [deployments/kubernetes/README.md](deployments/kubernetes/README.md)
+- 모니터링 자산: [deployments/monitoring/README.md](deployments/monitoring/README.md)
 
 ## 라이선스
 

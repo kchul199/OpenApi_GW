@@ -4,6 +4,7 @@ Unit tests for the admin control-plane app.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -91,6 +92,19 @@ def _build_client() -> tuple[TestClient, _ConfigLoaderStub]:
     return TestClient(app), loader
 
 
+@contextmanager
+def _override_admin_settings(**overrides: object):
+    previous: dict[str, object] = {}
+    for key, value in overrides.items():
+        previous[key] = getattr(settings.admin, key)
+        setattr(settings.admin, key, value)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            setattr(settings.admin, key, value)
+
+
 def test_admin_ui_serves_html() -> None:
     client, _ = _build_client()
 
@@ -124,6 +138,20 @@ def test_dashboard_returns_summary() -> None:
     assert payload["protocols"]["WEBSOCKET"] == 1
 
 
+def test_dashboard_blocks_disallowed_ip() -> None:
+    with _override_admin_settings(allowed_ips="203.0.113.5/32"):
+        client, _ = _build_client()
+        response = client.get(
+            "/api/v1/dashboard",
+            headers={
+                "X-Admin-Key": settings.admin.api_key,
+                "X-Forwarded-For": "198.51.100.1",
+            },
+        )
+
+    assert response.status_code == 403
+
+
 def test_reload_endpoint_refreshes_config() -> None:
     client, loader = _build_client()
 
@@ -133,6 +161,23 @@ def test_reload_endpoint_refreshes_config() -> None:
     )
 
     assert response.status_code == 200
+    assert loader.reload_calls == 1
+
+
+def test_write_rate_limit_blocks_excess_mutations() -> None:
+    with _override_admin_settings(max_write_actions_per_minute=1):
+        client, loader = _build_client()
+        first = client.post(
+            "/api/v1/reload",
+            headers={"X-Admin-Key": settings.admin.api_key},
+        )
+        second = client.post(
+            "/api/v1/reload",
+            headers={"X-Admin-Key": settings.admin.api_key},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
     assert loader.reload_calls == 1
 
 
@@ -232,6 +277,18 @@ def test_read_key_cannot_write() -> None:
     )
 
     assert response.status_code == 403
+
+
+def test_rotate_key_accepts_expiration_ttl() -> None:
+    client, _ = _build_client()
+    response = client.post(
+        "/api/v1/admin/keys/rotate",
+        headers={"X-Admin-Key": settings.admin.api_key},
+        json={"role": "read", "label": "ttl-key", "expires_in_seconds": 3600},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["new_key"]["expires_at"]
 
 
 def test_history_and_rollback_flow() -> None:

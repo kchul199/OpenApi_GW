@@ -1,0 +1,59 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: oag-alert-rules
+  namespace: oag-system
+spec:
+  groups:
+    - name: oag.gateway.rules
+      rules:
+        - alert: OAGGateway5xxHigh
+          expr: |
+            (
+              sum(rate(gateway_requests_total{status_code=~"5.."}[5m]))
+              /
+              clamp_min(sum(rate(gateway_requests_total[5m])), 1)
+            ) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            service: oag-gateway
+          annotations:
+            summary: "Gateway 5xx 비율이 높습니다."
+            description: "최근 10분 동안 5xx 비율이 5%를 초과했습니다."
+
+        - alert: OAGGatewayRequestLatencyP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum(rate(gateway_request_duration_seconds_bucket[5m])) by (le)
+            ) > 1.5
+          for: 10m
+          labels:
+            severity: warning
+            service: oag-gateway
+          annotations:
+            summary: "Gateway P95 지연이 높습니다."
+            description: "최근 10분 동안 P95 응답시간이 1.5초를 초과했습니다."
+
+    - name: oag.admin.rules
+      rules:
+        - alert: OAGAdminAuthFailuresHigh
+          expr: sum(increase(admin_auth_failures_total[5m])) > 20
+          for: 5m
+          labels:
+            severity: warning
+            service: oag-admin
+          annotations:
+            summary: "Admin 인증 실패가 급증했습니다."
+            description: "5분 동안 admin_auth_failures_total 증가량이 20건을 넘었습니다."
+
+        - alert: OAGAdminWriteRateLimited
+          expr: sum(increase(admin_actions_total{status="rate_limited"}[5m])) > 0
+          for: 1m
+          labels:
+            severity: info
+            service: oag-admin
+          annotations:
+            summary: "Admin write rate-limit 이벤트가 발생했습니다."
+            description: "관리 API write 보호 제한이 동작하고 있습니다."

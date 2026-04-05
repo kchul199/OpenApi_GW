@@ -1,126 +1,198 @@
 routes:
-  # ── REST: Public user service (no auth) ───────────────────────────────────
-  - id: public-health
-    description: "Public health check passthrough"
-    match:
-      protocol: HTTP
-      path: /health
-      methods: [GET]
-    upstream:
-      type: REST
-      targets:
-        - url: http://user-service:8000
-          weight: 100
-      timeout: 5.0
-      retry:
-        count: 1
-        backoff_factor: 0.1
-        status_codes: [502, 503]
-      load_balance: round_robin
-    plugins: []
-
-  # ── REST: User service with JWT auth + rate limiting ─────────────────────
-  - id: user-service-v1
-    description: "User management service v1"
-    match:
-      protocol: HTTP
-      path: /api/v1/users/**
-      methods: [GET, POST, PUT, DELETE, PATCH]
-      headers: {}
-    upstream:
-      type: REST
-      targets:
-        - url: http://user-service:8000
-          weight: 80
-        - url: http://user-service-canary:8000
-          weight: 20
-      timeout: 30.0
-      retry:
-        count: 3
-        backoff_factor: 0.3
-        status_codes: [502, 503, 504]
-      load_balance: round_robin
-    strip_prefix: false
-    preserve_host: false
-    plugins:
-      - name: jwt-validator
-        enabled: true
-        config:
-          secret_key: "your-secret-key-change-in-production"
-          algorithm: HS256
-      - name: rate-limiter
-        enabled: true
-        config:
-          limit: 1000
-          window: 60
-          key_func: user
-      - name: circuit-breaker
-        enabled: true
-        config:
-          failure_threshold: 5
-          recovery_timeout: 30.0
-          success_threshold: 2
-
-  # ── REST: Internal service with API Key auth ──────────────────────────────
-  - id: order-service-v1
-    description: "Order service — internal API Key auth"
-    match:
-      protocol: HTTP
-      path: /api/v1/orders/**
-      methods: [GET, POST, PUT, DELETE]
-    upstream:
-      type: REST
-      targets:
-        - url: http://order-service:8001
-          weight: 100
-      timeout: 15.0
-      retry:
-        count: 2
-        backoff_factor: 0.2
-        status_codes: [503, 504]
-      load_balance: round_robin
-    plugins:
-      - name: api-key
-        enabled: true
-        config:
-          keys:
-            - "sk-test-key-12345678"
-            - "sk-prod-key-87654321"
-          header_name: "x-api-key"
-      - name: rate-limiter
-        enabled: true
-        config:
-          limit: 500
-          window: 60
-          key_func: api_key
-
-  # ── WebSocket: Real-time chat ─────────────────────────────────────────────
-  - id: chat-websocket
-    description: "Real-time chat WebSocket proxy"
-    match:
-      protocol: WebSocket
-      path: /ws/chat/**
-      methods: [GET]
-    upstream:
-      type: WebSocket
-      targets:
-        - url: ws://chat-service:8002
-          weight: 100
-      timeout: 3600.0
-      retry:
-        count: 0
-        backoff_factor: 0.0
-        status_codes: []
-      load_balance: ip_hash
-    plugins:
-      - name: jwt-validator
-        enabled: true
-        config:
-          secret_key: "your-secret-key-change-in-production"
-          algorithm: HS256
-      - name: rate-limiter
-        enabled: true
-        config:
-          limit: 10
-          window: 60
-          key_func: user
+- id: public-health
+  description: Public health check passthrough
+  match:
+    protocol: HTTP
+    path: /health
+    methods:
+    - GET
+    headers: {}
+  upstream:
+    type: REST
+    targets:
+    - url: http://user-service:8000
+      weight: 100
+    timeout: 5.0
+    retry:
+      count: 1
+      backoff_factor: 0.1
+      status_codes:
+      - 502
+      - 503
+    load_balance: round_robin
+    hash_on: client_ip
+  grpc:
+    cardinality: unary_unary
+    wait_for_ready: true
+    inject_request_id: true
+    drop_metadata:
+    - host
+    - :authority
+  websocket:
+    connect_timeout: 10.0
+    inject_request_id: true
+    forward_headers: []
+    extra_headers: {}
+  plugins: []
+  strip_prefix: false
+  preserve_host: false
+- id: user-service-v1
+  description: User management service v1
+  match:
+    protocol: HTTP
+    path: /api/v1/users/**
+    methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+    - PATCH
+    headers: {}
+  upstream:
+    type: REST
+    targets:
+    - url: http://user-service:8000
+      weight: 80
+    - url: http://user-service-canary:8000
+      weight: 20
+    timeout: 30.0
+    retry:
+      count: 3
+      backoff_factor: 0.3
+      status_codes:
+      - 502
+      - 503
+      - 504
+    load_balance: round_robin
+    hash_on: client_ip
+  grpc:
+    cardinality: unary_unary
+    wait_for_ready: true
+    inject_request_id: true
+    drop_metadata:
+    - host
+    - :authority
+  websocket:
+    connect_timeout: 10.0
+    inject_request_id: true
+    forward_headers: []
+    extra_headers: {}
+  plugins:
+  - name: jwt-validator
+    enabled: true
+    config:
+      secret_key: ${OAG_USER_JWT_SECRET:-your-secret-key-change-in-production}
+      algorithm: HS256
+  - name: rate-limiter
+    enabled: true
+    config:
+      limit: 1000
+      window: 60
+      key_func: user
+  - name: circuit-breaker
+    enabled: true
+    config:
+      failure_threshold: 5
+      recovery_timeout: 30.0
+      success_threshold: 2
+  strip_prefix: false
+  preserve_host: false
+- id: order-service-v1
+  description: Order service — internal API Key auth
+  match:
+    protocol: HTTP
+    path: /api/v1/orders/**
+    methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+    headers: {}
+  upstream:
+    type: REST
+    targets:
+    - url: http://order-service:8001
+      weight: 100
+    timeout: 15.0
+    retry:
+      count: 2
+      backoff_factor: 0.2
+      status_codes:
+      - 503
+      - 504
+    load_balance: round_robin
+    hash_on: client_ip
+  grpc:
+    cardinality: unary_unary
+    wait_for_ready: true
+    inject_request_id: true
+    drop_metadata:
+    - host
+    - :authority
+  websocket:
+    connect_timeout: 10.0
+    inject_request_id: true
+    forward_headers: []
+    extra_headers: {}
+  plugins:
+  - name: api-key
+    enabled: true
+    config:
+      keys:
+      - ${OAG_ORDER_API_KEY_1:-sk-test-key-12345678}
+      - ${OAG_ORDER_API_KEY_2:-sk-prod-key-87654321}
+      header_name: x-api-key
+  - name: rate-limiter
+    enabled: true
+    config:
+      limit: 500
+      window: 60
+      key_func: api_key
+  strip_prefix: false
+  preserve_host: false
+- id: chat-websocket
+  description: Real-time chat WebSocket proxy
+  match:
+    protocol: WebSocket
+    path: /ws/chat/**
+    methods:
+    - GET
+    headers: {}
+  upstream:
+    type: WebSocket
+    targets:
+    - url: ws://chat-service:8002
+      weight: 100
+    timeout: 3600.0
+    retry:
+      count: 0
+      backoff_factor: 0.0
+      status_codes: []
+    load_balance: ip_hash
+    hash_on: client_ip
+  grpc:
+    cardinality: unary_unary
+    wait_for_ready: true
+    inject_request_id: true
+    drop_metadata:
+    - host
+    - :authority
+  websocket:
+    connect_timeout: 10.0
+    inject_request_id: true
+    forward_headers: []
+    extra_headers: {}
+  plugins:
+  - name: jwt-validator
+    enabled: true
+    config:
+      secret_key: ${OAG_CHAT_JWT_SECRET:-your-secret-key-change-in-production}
+      algorithm: HS256
+  - name: rate-limiter
+    enabled: true
+    config:
+      limit: 10
+      window: 60
+      key_func: user
+  strip_prefix: false
+  preserve_host: false

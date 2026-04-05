@@ -43,6 +43,7 @@ const formPlugins = document.getElementById("form-plugins");
 
 const rotateKeyRole = document.getElementById("rotate-key-role");
 const rotateKeyLabel = document.getElementById("rotate-key-label");
+const rotateKeyTtl = document.getElementById("rotate-key-ttl");
 
 const state = {
   adminKey: sessionStorage.getItem("oag-admin-key") || "",
@@ -581,7 +582,7 @@ function renderKeys() {
   keysTable.innerHTML = "";
   if (!state.keys.length) {
     const row = document.createElement("tr");
-    row.innerHTML = '<td colspan="5">등록된 키가 없습니다.</td>';
+    row.innerHTML = '<td colspan="6">등록된 키가 없습니다.</td>';
     keysTable.appendChild(row);
     return;
   }
@@ -589,11 +590,18 @@ function renderKeys() {
   state.keys.forEach((keyRecord) => {
     const row = document.createElement("tr");
     const createdAt = keyRecord.created_at ? new Date(keyRecord.created_at).toLocaleString() : "-";
+    const expiresAt = keyRecord.expires_at ? new Date(keyRecord.expires_at).toLocaleString() : "-";
+    const status = keyRecord.expired
+      ? "expired"
+      : keyRecord.active
+        ? "active"
+        : "inactive";
     row.innerHTML = `
       <td>${keyRecord.id}</td>
       <td>${keyRecord.role}</td>
-      <td>${keyRecord.active ? "active" : "inactive"}</td>
+      <td>${status}</td>
       <td>${createdAt}</td>
+      <td>${expiresAt}</td>
       <td><button class="rollback-btn" ${keyRecord.active ? "" : "disabled"}>비활성화</button></td>
     `;
     const deactivateButton = row.querySelector(".rollback-btn");
@@ -619,15 +627,22 @@ async function loadKeys() {
 
 async function rotateKey() {
   try {
+    const ttlRaw = rotateKeyTtl.value.trim();
+    const ttl = ttlRaw ? Number.parseInt(ttlRaw, 10) : null;
+    if (ttlRaw && (!Number.isFinite(ttl) || ttl <= 0)) {
+      throw new Error("TTL은 1 이상의 숫자로 입력해 주세요.");
+    }
     const payload = await fetchJson("/api/v1/admin/keys/rotate", {
       method: "POST",
       body: JSON.stringify({
         role: rotateKeyRole.value,
         label: rotateKeyLabel.value.trim(),
+        expires_in_seconds: ttl,
       }),
     });
     newKeyBox.classList.remove("hidden");
     newKeyValue.textContent = JSON.stringify(payload.new_key, null, 2);
+    rotateKeyTtl.value = "";
     await loadKeys();
     setStatus("키 회전이 완료되었습니다. 새 키를 안전하게 보관해 주세요.", "success");
   } catch (error) {

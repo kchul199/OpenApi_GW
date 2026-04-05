@@ -32,7 +32,31 @@ kind load docker-image open-api-gateway:local --name oag-cluster
 
 ## 3. 리소스 배포
 
-`kubectl apply` 커명령어를 사용하여 전체 리소스를 배포합니다.
+`kubectl apply` 명령어를 사용하여 전체 리소스를 배포합니다.
+
+먼저 Admin API 키를 Secret에 주입합니다.
+
+```bash
+# 기본 템플릿 파일 수정
+vi deployments/kubernetes/base/08-admin-secrets.yaml
+
+# 혹은 즉시 덮어쓰기
+kubectl create secret generic admin-control-plane-secrets \
+  -n oag-system \
+  --from-literal=admin_api_key='replace-with-strong-key' \
+  --from-literal=read_api_keys='' \
+  --from-literal=write_api_keys='' \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+필요하면 Admin 정책 ConfigMap을 커스터마이징합니다.
+
+```bash
+vi deployments/kubernetes/base/10-admin-policy-config.yaml
+```
+
+Admin runtime state(`admin_keys.json`, `route_history.json`, `admin_audit.log`)는
+`admin-runtime-pvc`에 영속 저장됩니다.
 
 ```bash
 kubectl apply -f deployments/kubernetes/base/
@@ -65,10 +89,17 @@ Admin API 접속:
 kubectl port-forward svc/admin -n oag-system 9000:9000
 
 # Admin API 라우트 확인
-curl -H "X-Admin-Key: changeme-admin-key" http://localhost:9000/api/v1/routes
+curl -H "X-Admin-Key: replace-with-strong-key" http://localhost:9000/api/v1/routes
 ```
 
-## 5. 클린업
+## 5. 라우트 시크릿 주입(선택)
+
+`config/routes.yaml`은 `${ENV}` / `${ENV:-default}` 형식의 환경변수 치환을 지원합니다.
+예: `${OAG_USER_JWT_SECRET:-dev-secret}`
+
+Pod 환경변수로 주입하면 플러그인 시크릿을 파일에 하드코딩하지 않아도 됩니다.
+
+## 6. 클린업
 
 ```bash
 kubectl delete -f deployments/kubernetes/base/
