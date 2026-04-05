@@ -4,17 +4,19 @@ Admin API - control-plane app for managing routes, auth keys, and history.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Awaitable, Callable
 from difflib import unified_diff
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from pathlib import Path
+from time import monotonic
 from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request, Security
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from admin.audit import AdminAuditLogger
 from admin.history import RouteHistoryStore
@@ -31,14 +33,67 @@ _STATIC_DIR = Path(__file__).with_name("static")
 class RotateKeyRequest(BaseModel):
     role: AdminRole = "write"
     label: str = ""
+    expires_in_seconds: int | None = Field(default=None, ge=1, le=31_536_000)
     deactivate_key_id: str | None = None
 
 
 AuthDependency = Callable[[Request, str], Awaitable[AdminPrincipal]]
+AllowedIPNetwork = IPv4Network | IPv6Network
+
+
+class WriteActionRateLimiter:
+    """In-memory rolling-window limiter for admin write actions."""
+
+    def __init__(self, limit_per_minute: int, window_seconds: float = 60.0) -> None:
+        self._limit = limit_per_minute
+        self._window = window_seconds
+        self._events: dict[str, deque[float]] = {}
+
+    def allow(self, bucket: str) -> bool:
+        if self._limit <= 0:
+            return True
+        now = monotonic()
+        slots = self._events.setdefault(bucket, deque())
+        while slots and now - slots[0] >= self._window:
+            slots.popleft()
+        if len(slots) >= self._limit:
+            return False
+        slots.append(now)
+        return True
 
 
 def _parse_csv_keys(raw: str) -> list[str]:
     return [token.strip() for token in raw.split(",") if token.strip()]
+
+
+def _parse_allowed_networks(raw: str) -> list[AllowedIPNetwork]:
+    networks: list[AllowedIPNetwork] = []
+    for token in _parse_csv_keys(raw):
+        try:
+            networks.append(ip_network(token, strict=False))
+        except ValueError as exc:
+            raise ValueError(f"Invalid ADMIN__ALLOWED_IPS entry: '{token}'") from exc
+    return networks
+
+
+def _extract_client_ip(request: Request, trust_proxy_headers: bool) -> str:
+    if trust_proxy_headers:
+        forwarded_for = request.headers.get("x-forwarded-for", "")
+        if forwarded_for:
+            first_hop = forwarded_for.split(",")[0].strip()
+            if first_hop:
+                return first_hop
+    return request.client.host if request.client else ""
+
+
+def _ip_in_allowlist(client_ip: str, allowed_networks: list[AllowedIPNetwork]) -> bool:
+    if not allowed_networks:
+        return True
+    try:
+        client = ip_address(client_ip)
+    except ValueError:
+        return False
+    return any(client in network for network in allowed_networks)
 
 
 def _summarize_route(route: RouteConfig) -> dict[str, Any]:
@@ -108,6 +163,11 @@ def _build_dashboard_payload(config_loader: ConfigLoader) -> dict[str, Any]:
             "grpc_routes": protocol_counts.get("GRPC", 0),
             "websocket_routes": protocol_counts.get("WEBSOCKET", 0),
         },
+        "admin_policy": {
+            "allowed_ip_rules": len(_parse_csv_keys(settings.admin.allowed_ips)),
+            "write_limit_per_minute": settings.admin.max_write_actions_per_minute,
+            "default_key_ttl_seconds": settings.admin.default_key_ttl_seconds,
+        },
         "routes": [_summarize_route(route) for route in routes],
     }
 
@@ -171,6 +231,8 @@ def create_admin_app(
 ) -> FastAPI:
     bootstrap_write_keys = [settings.admin.api_key, *_parse_csv_keys(settings.admin.write_api_keys)]
     bootstrap_read_keys = _parse_csv_keys(settings.admin.read_api_keys)
+    allowed_networks = _parse_allowed_networks(settings.admin.allowed_ips)
+    write_rate_limiter = WriteActionRateLimiter(settings.admin.max_write_actions_per_minute)
     key_store = AdminKeyStore(
         key_store_file or settings.admin.key_store_file,
         bootstrap_write_keys=bootstrap_write_keys,
@@ -181,6 +243,9 @@ def create_admin_app(
         route_history_file or settings.admin.route_history_file,
         max_entries=settings.admin.route_history_max_entries,
     )
+
+    def _client_ip(request: Request) -> str:
+        return _extract_client_ip(request, settings.admin.trust_proxy_headers)
 
     def _audit(
         request: Request,
@@ -195,10 +260,36 @@ def create_admin_app(
                 "status": status,
                 "actor_key_id": principal.key_id if principal else "",
                 "actor_role": principal.role if principal else "",
-                "ip": request.client.host if request.client else "",
+                "ip": _client_ip(request),
                 "path": request.url.path,
                 "detail": detail or {},
             }
+        )
+
+    def _guard_write_action(
+        request: Request,
+        principal: AdminPrincipal,
+        action: str,
+    ) -> None:
+        limit = settings.admin.max_write_actions_per_minute
+        if limit <= 0:
+            return
+        client_ip = _client_ip(request)
+        bucket = f"{principal.key_id}:{client_ip}"
+        if write_rate_limiter.allow(bucket):
+            return
+
+        ADMIN_ACTIONS_TOTAL.labels(action=action, status="rate_limited").inc()
+        _audit(
+            request,
+            principal,
+            action=action,
+            status="rate_limited",
+            detail={"client_ip": client_ip, "limit_per_minute": limit},
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Write rate limit exceeded ({limit}/minute)",
         )
 
     def _require_role(required_role: AdminRole) -> AuthDependency:
@@ -224,6 +315,17 @@ def create_admin_app(
                     status_code=403,
                     detail=f"'{required_role}' role required",
                 )
+            client_ip = _client_ip(request)
+            if not _ip_in_allowlist(client_ip, allowed_networks):
+                ADMIN_AUTH_FAILURES_TOTAL.labels(required_role=required_role, reason="ip_blocked").inc()
+                _audit(
+                    request,
+                    principal,
+                    action="auth",
+                    status="ip_blocked",
+                    detail={"required_role": required_role, "client_ip": client_ip},
+                )
+                raise HTTPException(status_code=403, detail="Access denied from this IP")
             return principal
 
         return _dependency
@@ -233,7 +335,7 @@ def create_admin_app(
 
     admin = FastAPI(
         title="OAG Admin API",
-        version="1.1.0",
+        version="1.2.0",
         description="Open API Gateway - Admin Control Plane",
     )
 
@@ -304,6 +406,7 @@ def create_admin_app(
         payload: dict[str, Any],
         principal: AdminPrincipal = Security(require_write),
     ) -> dict[str, Any]:
+        _guard_write_action(request, principal, action="route_create")
         try:
             route = config_loader.validate_route_payload(payload)
             await config_loader.create_route(route)
@@ -339,6 +442,7 @@ def create_admin_app(
         payload: dict[str, Any],
         principal: AdminPrincipal = Security(require_write),
     ) -> dict[str, Any]:
+        _guard_write_action(request, principal, action="route_update")
         before_route = _find_route(config_loader, route_id)
         if before_route is None:
             ADMIN_ACTIONS_TOTAL.labels(action="route_update", status="not_found").inc()
@@ -380,6 +484,7 @@ def create_admin_app(
         request: Request,
         principal: AdminPrincipal = Security(require_write),
     ) -> dict[str, Any]:
+        _guard_write_action(request, principal, action="route_delete")
         route = _find_route(config_loader, route_id)
         if route is None:
             ADMIN_ACTIONS_TOTAL.labels(action="route_delete", status="not_found").inc()
@@ -409,6 +514,7 @@ def create_admin_app(
         request: Request,
         principal: AdminPrincipal = Security(require_write),
     ) -> dict[str, Any]:
+        _guard_write_action(request, principal, action="route_rollback")
         entry = history_store.find(entry_id)
         if entry is None:
             raise HTTPException(status_code=404, detail=f"History entry '{entry_id}' not found")
@@ -481,6 +587,7 @@ def create_admin_app(
         request: Request,
         principal: AdminPrincipal = Security(require_write),
     ) -> dict[str, Any]:
+        _guard_write_action(request, principal, action="config_reload")
         await config_loader.reload()
         routing_engine.update_routes(config_loader.routes)
         await _publish_reload_event()
@@ -510,7 +617,15 @@ def create_admin_app(
         request: Request,
         principal: AdminPrincipal = Security(require_write),
     ) -> dict[str, Any]:
-        created = key_store.create_key(role=payload.role, label=payload.label)
+        _guard_write_action(request, principal, action="key_rotate")
+        expires_in_seconds = payload.expires_in_seconds
+        if expires_in_seconds is None and settings.admin.default_key_ttl_seconds > 0:
+            expires_in_seconds = settings.admin.default_key_ttl_seconds
+        created = key_store.create_key(
+            role=payload.role,
+            label=payload.label,
+            expires_in_seconds=expires_in_seconds,
+        )
         deactivated = False
         if payload.deactivate_key_id:
             deactivated = key_store.deactivate_key(payload.deactivate_key_id)
@@ -534,6 +649,7 @@ def create_admin_app(
         request: Request,
         principal: AdminPrincipal = Security(require_write),
     ) -> dict[str, Any]:
+        _guard_write_action(request, principal, action="key_deactivate")
         if not key_store.deactivate_key(key_id):
             raise HTTPException(status_code=404, detail=f"Key '{key_id}' not found or inactive")
         ADMIN_ACTIONS_TOTAL.labels(action="key_deactivate", status="ok").inc()

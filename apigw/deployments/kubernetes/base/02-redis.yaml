@@ -20,10 +20,12 @@ spec:
             - containerPort: 6379
           command: ["redis-server"]
           args: ["--appendonly", "yes"]
-          healthcheck:
-            test: ["CMD", "redis-cli", "ping"]
-            interval: 10s
-            timeout: 3s
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
             failureThreshold: 5
 ---
 apiVersion: v1

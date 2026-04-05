@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: admin-control-plane-config
+  namespace: oag-system
+data:
+  # 쉼표 구분 CIDR/IP. 비우면 전체 허용.
+  allowed_ips: ""
+  # LB/Ingress를 통해 X-Forwarded-For를 신뢰하는 경우 true.
+  trust_proxy_headers: "true"
+  # 0 이하이면 write rate-limit 비활성.
+  max_write_actions_per_minute: "120"
+  # 0이면 rotate 키 기본 만료 없음.
+  default_key_ttl_seconds: "0"

@@ -25,7 +25,52 @@ spec:
             - name: ENVIRONMENT
               value: "development"
             - name: ADMIN__API_KEY
-              value: "changeme-admin-key"
+              valueFrom:
+                secretKeyRef:
+                  name: admin-control-plane-secrets
+                  key: admin_api_key
+            - name: ADMIN__READ_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: admin-control-plane-secrets
+                  key: read_api_keys
+                  optional: true
+            - name: ADMIN__WRITE_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: admin-control-plane-secrets
+                  key: write_api_keys
+                  optional: true
+            - name: ADMIN__ALLOWED_IPS
+              valueFrom:
+                configMapKeyRef:
+                  name: admin-control-plane-config
+                  key: allowed_ips
+                  optional: true
+            - name: ADMIN__TRUST_PROXY_HEADERS
+              valueFrom:
+                configMapKeyRef:
+                  name: admin-control-plane-config
+                  key: trust_proxy_headers
+                  optional: true
+            - name: ADMIN__MAX_WRITE_ACTIONS_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: admin-control-plane-config
+                  key: max_write_actions_per_minute
+                  optional: true
+            - name: ADMIN__DEFAULT_KEY_TTL_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: admin-control-plane-config
+                  key: default_key_ttl_seconds
+                  optional: true
+            - name: ADMIN__KEY_STORE_FILE
+              value: "/app/runtime/admin_keys.json"
+            - name: ADMIN__AUDIT_LOG_FILE
+              value: "/app/runtime/admin_audit.log"
+            - name: ADMIN__ROUTE_HISTORY_FILE
+              value: "/app/runtime/route_history.json"
             - name: REDIS__URL
               value: "redis://redis.oag-system.svc.cluster.local:6379/0"
             - name: ROUTES_CONFIG
@@ -36,10 +81,38 @@ spec:
             - name: config-volume
               mountPath: /app/config
               readOnly: true
+            - name: admin-runtime
+              mountPath: /app/runtime
+          livenessProbe:
+            httpGet:
+              path: /_health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /_health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
       volumes:
         - name: config-volume
           configMap:
             name: oag-config
+        - name: admin-runtime
+          persistentVolumeClaim:
+            claimName: admin-runtime-pvc
 ---
 apiVersion: v1
 kind: Service
