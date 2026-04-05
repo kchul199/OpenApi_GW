@@ -2,10 +2,12 @@
 Plugin base interface.
 All gateway plugins must extend BasePlugin and implement __call__.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import Request, Response
 
@@ -31,11 +33,12 @@ class BasePlugin(ABC):
     #: Execution order (lower = earlier in the chain)
     order: int = 100
 
-    def configure(self, config: dict) -> None:
+    def configure(self, config: dict[str, Any]) -> None:
         """
         Called once with the plugin's per-route or global config dict.
         Override to apply configuration.
         """
+        del config
 
     @abstractmethod
     async def __call__(

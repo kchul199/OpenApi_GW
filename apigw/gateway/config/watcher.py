@@ -3,9 +3,11 @@ Config File Watcher.
 Uses simple polling to detect file modification and trigger a reload.
 Designed to work well with Kubernetes ConfigMap updates.
 """
+
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import logging
 import os
 from pathlib import Path
@@ -18,10 +20,10 @@ class ConfigFileWatcher:
         self._files: list[Path] = [Path(f) for f in files]
         self._check_interval: float = check_interval
         self._mtimes: dict[str, float] = {}
-        self._task: asyncio.Task | None = None
-        self._callback = None
+        self._task: asyncio.Task[None] | None = None
+        self._callback: Callable[[], Awaitable[None]] | None = None
 
-    def on_change(self, callback) -> None:
+    def on_change(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Register an async callback to run when files change."""
         self._callback = callback
 

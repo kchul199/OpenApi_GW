@@ -2,23 +2,25 @@
 YAML-based route and gateway configuration loader.
 Supports hot-reload via file watch or explicit reload call.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-import yaml
 from pydantic import BaseModel, Field, field_validator
+import yaml  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
 
 # ─── Route Model ──────────────────────────────────────────────────────────────
 
+
 class MatchConfig(BaseModel):
-    protocol: str = "HTTP"          # HTTP | gRPC | WebSocket | MQTT
+    protocol: str = "HTTP"  # HTTP | gRPC | WebSocket | MQTT
     host: str | None = None
     path: str = "/"
     methods: list[str] = Field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -36,12 +38,49 @@ class RetryConfig(BaseModel):
     status_codes: list[int] = Field(default_factory=lambda: [502, 503, 504])
 
 
+class GRPCProxyConfig(BaseModel):
+    cardinality: str = "unary_unary"
+    timeout: float | None = None
+    wait_for_ready: bool = True
+    secure: bool | None = None
+    root_cert_file: str | None = None
+    inject_request_id: bool = True
+    drop_metadata: list[str] = Field(default_factory=lambda: ["host", ":authority"])
+
+    @field_validator("cardinality")
+    @classmethod
+    def validate_cardinality(cls, value: str) -> str:
+        allowed = {"unary_unary", "unary_stream", "stream_unary", "stream_stream"}
+        normalized = value.lower()
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported gRPC cardinality: {value}")
+        return normalized
+
+
+class WebSocketProxyConfig(BaseModel):
+    connect_timeout: float = 10.0
+    inject_request_id: bool = True
+    forward_headers: list[str] = Field(default_factory=list)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+
+
 class UpstreamConfig(BaseModel):
-    type: str = "REST"              # REST | gRPC | WebSocket
+    type: str = "REST"  # REST | gRPC | WebSocket
     targets: list[UpstreamTarget]
-    timeout: float = 30.0           # seconds
+    timeout: float = 30.0  # seconds
     retry: RetryConfig = Field(default_factory=RetryConfig)
     load_balance: str = "round_robin"  # round_robin | random | ip_hash | least_connections
+    hash_on: str = "client_ip"
+    hash_key: str | None = None
+
+    @field_validator("hash_on")
+    @classmethod
+    def validate_hash_on(cls, value: str) -> str:
+        allowed = {"client_ip", "request_id", "header", "query_param", "path"}
+        normalized = value.lower()
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported upstream hash_on: {value}")
+        return normalized
 
 
 class PluginConfig(BaseModel):
@@ -55,12 +94,15 @@ class RouteConfig(BaseModel):
     description: str = ""
     match: MatchConfig
     upstream: UpstreamConfig
+    grpc: GRPCProxyConfig = Field(default_factory=GRPCProxyConfig)
+    websocket: WebSocketProxyConfig = Field(default_factory=WebSocketProxyConfig)
     plugins: list[PluginConfig] = Field(default_factory=list)
     strip_prefix: bool = False
     preserve_host: bool = False
 
 
 # ─── Gateway Config Model ─────────────────────────────────────────────────────
+
 
 class GatewayConfig(BaseModel):
     name: str = "Open API Gateway"
@@ -69,6 +111,7 @@ class GatewayConfig(BaseModel):
 
 
 # ─── Loader ───────────────────────────────────────────────────────────────────
+
 
 class ConfigLoader:
     """Loads and hot-reloads YAML configuration files."""
@@ -114,6 +157,67 @@ class ConfigLoader:
             "Config hot-reloaded",
             extra={"routes_before": old_count, "routes_after": len(self._routes)},
         )
+
+    def validate_route_payload(self, payload: dict[str, Any]) -> RouteConfig:
+        """Validate a route payload without persisting it."""
+        return RouteConfig.model_validate(payload)
+
+    def render_routes_yaml(self, routes: list[RouteConfig]) -> str:
+        document = {
+            "routes": [route.model_dump(mode="python", exclude_none=True) for route in routes],
+        }
+        return cast(
+            str,
+            yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+        )
+
+    async def save_routes(self, routes: list[RouteConfig]) -> None:
+        """Persist an entire route set and update in-memory state."""
+        yaml_text = self.render_routes_yaml(routes)
+        async with self._lock:
+            self._routes_path.write_text(yaml_text, encoding="utf-8")
+            self._routes = list(routes)
+
+    async def create_route(self, route: RouteConfig) -> None:
+        """Append a new route to the persisted config."""
+        async with self._lock:
+            if any(existing.id == route.id for existing in self._routes):
+                raise ValueError(f"Route '{route.id}' already exists")
+            next_routes = [*self._routes, route]
+            self._routes_path.write_text(self.render_routes_yaml(next_routes), encoding="utf-8")
+            self._routes = next_routes
+
+    async def update_route(self, current_route_id: str, route: RouteConfig) -> None:
+        """Replace or rename an existing route in the persisted config."""
+        async with self._lock:
+            if route.id != current_route_id and any(
+                existing.id == route.id for existing in self._routes
+            ):
+                raise ValueError(f"Route '{route.id}' already exists")
+
+            next_routes: list[RouteConfig] = []
+            found = False
+            for existing in self._routes:
+                if existing.id == current_route_id:
+                    next_routes.append(route)
+                    found = True
+                else:
+                    next_routes.append(existing)
+
+            if not found:
+                raise KeyError(current_route_id)
+
+            self._routes_path.write_text(self.render_routes_yaml(next_routes), encoding="utf-8")
+            self._routes = next_routes
+
+    async def delete_route(self, route_id: str) -> None:
+        """Delete a route from the persisted config."""
+        async with self._lock:
+            next_routes = [route for route in self._routes if route.id != route_id]
+            if len(next_routes) == len(self._routes):
+                raise KeyError(route_id)
+            self._routes_path.write_text(self.render_routes_yaml(next_routes), encoding="utf-8")
+            self._routes = next_routes
 
     @property
     def routes(self) -> list[RouteConfig]:

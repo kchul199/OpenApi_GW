@@ -46,6 +46,12 @@ class AdminSettings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 9000
     api_key: str = Field(default="changeme-admin-key", description="Admin API 접근 키")
+    read_api_keys: str = Field(default="", description="쉼표 구분 read 전용 API 키 목록")
+    write_api_keys: str = Field(default="", description="쉼표 구분 write API 키 목록")
+    key_store_file: str = "config/admin_keys.json"
+    audit_log_file: str = "logs/admin_audit.log"
+    route_history_file: str = "config/route_history.json"
+    route_history_max_entries: int = 300
 
 
 class Settings(BaseSettings):

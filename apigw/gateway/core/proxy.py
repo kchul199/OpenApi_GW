@@ -1,17 +1,17 @@
 """
 Async HTTP Reverse Proxy using httpx.
 Streams requests to upstream and returns responses transparently.
-Supports timeout, retry (via tenacity), and header forwarding.
+Supports timeout, retry (exponential backoff), and header forwarding.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
-import httpx
 from fastapi import Request, Response
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import httpx
 
-from gateway.config.loader import RouteConfig
+from gateway.config.loader import RetryConfig, RouteConfig
 from gateway.core.context import GatewayContext
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ class HTTPReverseProxy:
                 url=upstream_url,
                 headers=req_headers,
                 content=body,
-                timeout=route.upstream.timeout,
+                request_timeout=route.upstream.timeout,
                 retry_cfg=route.upstream.retry,
             )
         except httpx.TimeoutException:
@@ -104,7 +104,11 @@ class HTTPReverseProxy:
     def _build_url(self, base: str, request: Request, route: RouteConfig) -> str:
         path = request.url.path
         if route.strip_prefix:
-            prefix = route.match.path.rstrip("/**").rstrip("*")
+            prefix = route.match.path
+            if prefix.endswith("/**"):
+                prefix = prefix[:-3]
+            elif prefix.endswith("*"):
+                prefix = prefix[:-1]
             path = path[len(prefix):] or "/"
         query = request.url.query
         url = base.rstrip("/") + path
@@ -113,8 +117,13 @@ class HTTPReverseProxy:
         return url
 
     async def _send_with_retry(
-        self, method: str, url: str, headers: dict, content: bytes,
-        timeout: float, retry_cfg,
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        content: bytes,
+        request_timeout: float,
+        retry_cfg: RetryConfig,
     ) -> httpx.Response:
         assert self._client is not None
 
@@ -126,7 +135,7 @@ class HTTPReverseProxy:
                     url=url,
                     headers=headers,
                     content=content,
-                    timeout=timeout,
+                    timeout=request_timeout,
                 )
                 if response.status_code not in retry_cfg.status_codes or attempt == retry_cfg.count:
                     return response
@@ -139,7 +148,6 @@ class HTTPReverseProxy:
                     break
                 logger.warning(f"Retrying upstream due to {exc.__class__.__name__} (attempt {attempt+1})")
 
-            import asyncio
             wait = retry_cfg.backoff_factor * (2 ** attempt)
             await asyncio.sleep(wait)
 

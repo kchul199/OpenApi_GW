@@ -20,6 +20,9 @@ oag-admin   = "admin.main:main"
 where = ["."]
 include = ["gateway*", "admin*"]
 
+[tool.setuptools.package-data]
+admin = ["static/*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -28,7 +31,30 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py311"
 
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, UP: pyupgrade
+# B: bugbear, C4: comprehensions, ASYNC: async 안티패턴
+select = ["E", "W", "F", "I", "UP", "B", "C4", "ASYNC"]
+ignore = [
+    "E501",   # line-length는 formatter가 처리
+    "B008",   # FastAPI Depends() 패턴 허용
+    "UP007",  # Optional[X] → X | None (점진적 전환)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gateway", "admin"]
+force-sort-within-sections = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true

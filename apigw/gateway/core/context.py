@@ -1,23 +1,24 @@
 """
 Core types and request context used throughout the gateway.
 """
+
 from __future__ import annotations
 
-import time
-import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
+import time
 from typing import Any
+import uuid
 
 
-class Protocol(str, Enum):
+class Protocol(StrEnum):
     HTTP = "HTTP"
     GRPC = "gRPC"
     WEBSOCKET = "WebSocket"
     MQTT = "MQTT"
 
 
-class AuthMethod(str, Enum):
+class AuthMethod(StrEnum):
     NONE = "none"
     JWT = "jwt"
     API_KEY = "api_key"
@@ -28,6 +29,7 @@ class AuthMethod(str, Enum):
 @dataclass
 class UpstreamInfo:
     """Resolved upstream target for this request."""
+
     url: str
     protocol: Protocol
     weight: int = 100
@@ -39,6 +41,7 @@ class GatewayContext:
     Per-request mutable context passed through the middleware pipeline.
     Plugins read from and write to this object.
     """
+
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     start_time: float = field(default_factory=time.monotonic)
 
@@ -48,12 +51,13 @@ class GatewayContext:
 
     # Auth
     auth_method: AuthMethod = AuthMethod.NONE
-    principal: str = ""         # user/service identifier
+    principal: str = ""  # user/service identifier
     scopes: list[str] = field(default_factory=list)
     claims: dict[str, Any] = field(default_factory=dict)
 
     # Rate limiting
     rate_limit_key: str = ""
+    upstream_hash_key: str = ""
 
     # Extra metadata plugins can attach
     metadata: dict[str, Any] = field(default_factory=dict)

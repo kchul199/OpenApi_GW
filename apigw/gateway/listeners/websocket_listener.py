@@ -2,16 +2,19 @@
 WebSocket Reverse Proxy Listener.
 Bidirectionally proxies WebSocket messages between client and upstream.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any, cast
 
-import websockets
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
+import websockets
 from websockets.exceptions import ConnectionClosed
 
-from gateway.core.context import GatewayContext, Protocol, UpstreamInfo
+from gateway.core.context import GatewayContext
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +31,13 @@ class WebSocketProxy:
         upstream_url: str,
         ctx: GatewayContext,
         extra_headers: dict[str, str] | None = None,
-    ) -> None:
-        headers = {"X-Request-ID": ctx.request_id}
+        connect_timeout: float = 10.0,
+    ) -> bool:
+        headers = {}
         if extra_headers:
             headers.update(extra_headers)
+        if "X-Request-ID" not in headers:
+            headers["X-Request-ID"] = ctx.request_id
 
         # Extract client's requested subprotocols
         client_subprotocols = client_ws.headers.get("sec-websocket-protocol", "").split(",")
@@ -39,24 +45,33 @@ class WebSocketProxy:
 
         logger.info(
             "WebSocket proxy initiating",
-            extra={"request_id": ctx.request_id, "upstream": upstream_url, "subprotocols": client_subprotocols},
+            extra={
+                "request_id": ctx.request_id,
+                "upstream": upstream_url,
+                "subprotocols": client_subprotocols,
+            },
         )
-        
+
+        accepted = False
         try:
             # 1. Connect to upstream FIRST before accepting the client
             async with websockets.connect(
-                upstream_url, 
-                extra_headers=headers, 
-                subprotocols=client_subprotocols if client_subprotocols else None
+                upstream_url,
+                additional_headers=headers,
+                subprotocols=cast(Any, client_subprotocols if client_subprotocols else None),
+                open_timeout=connect_timeout,
             ) as upstream_ws:
-                
                 # 2. Accept client with the subprotocol chosen by upstream
                 accepted_subprotocol = upstream_ws.subprotocol
                 await client_ws.accept(subprotocol=accepted_subprotocol)
-                
+                accepted = True
+
                 logger.info(
                     "WebSocket proxy connected",
-                    extra={"request_id": ctx.request_id, "accepted_subprotocol": accepted_subprotocol}
+                    extra={
+                        "request_id": ctx.request_id,
+                        "accepted_subprotocol": accepted_subprotocol,
+                    },
                 )
 
                 # 3. Start bidirectional pumping
@@ -68,20 +83,27 @@ class WebSocketProxy:
         except (ConnectionClosed, WebSocketDisconnect):
             pass
         except Exception as exc:
-            logger.error(f"WebSocket upstream connection failed: {exc}", extra={"request_id": ctx.request_id})
+            logger.error(
+                f"WebSocket upstream connection failed: {exc}", extra={"request_id": ctx.request_id}
+            )
         finally:
             try:
                 # If we haven't accepted yet (upstream failed), close with error
-                if client_ws.client_state.value == 0:  # ENUM 0 = CONNECTING
-                    await client_ws.close(code=1011) # Internal Error
+                if client_ws.client_state == WebSocketState.CONNECTING:
+                    await client_ws.close(code=1011)
                 else:
                     await client_ws.close()
             except Exception:
                 pass
             logger.info("WebSocket proxy closed", extra={"request_id": ctx.request_id})
+        return accepted
 
     @staticmethod
-    async def _client_to_upstream(client: WebSocket, upstream, ctx: GatewayContext) -> None:
+    async def _client_to_upstream(
+        client: WebSocket,
+        upstream: Any,
+        ctx: GatewayContext,
+    ) -> None:
         try:
             while True:
                 message = await client.receive()
@@ -95,7 +117,11 @@ class WebSocketProxy:
             logger.debug("Client→Upstream pipe closed", extra={"request_id": ctx.request_id})
 
     @staticmethod
-    async def _upstream_to_client(upstream, client: WebSocket, ctx: GatewayContext) -> None:
+    async def _upstream_to_client(
+        upstream: Any,
+        client: WebSocket,
+        ctx: GatewayContext,
+    ) -> None:
         try:
             async for message in upstream:
                 if isinstance(message, bytes):

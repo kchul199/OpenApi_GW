@@ -4,8 +4,8 @@ Prometheus metrics setup using prometheus-fastapi-instrumentator.
 from __future__ import annotations
 
 from fastapi import FastAPI
+from prometheus_client import Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
-from prometheus_client import Counter, Histogram, Gauge
 
 # ── Custom metrics ─────────────────────────────────────────────────────────────
 
@@ -38,6 +38,18 @@ AUTH_FAILURES_TOTAL = Counter(
     "gateway_auth_failures_total",
     "Total number of authentication failures",
     labelnames=["route_id", "auth_method"],
+)
+
+ADMIN_AUTH_FAILURES_TOTAL = Counter(
+    "admin_auth_failures_total",
+    "Total number of admin authentication/authorization failures",
+    labelnames=["required_role", "reason"],
+)
+
+ADMIN_ACTIONS_TOTAL = Counter(
+    "admin_actions_total",
+    "Total number of admin actions",
+    labelnames=["action", "status"],
 )
 
 
