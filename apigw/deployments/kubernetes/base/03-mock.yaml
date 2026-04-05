@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: mock-upstream
-          image: gcr.io/google-containers/echoserver:1.4
+          image: ealen/echo-server:latest
           ports:
             - containerPort: 8080
           env:
